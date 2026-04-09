@@ -8,7 +8,7 @@ import { query } from './db.js'
 import { ensureSchema, ensureSeedUsers, ensureSeedVendors } from './schema.js'
 import { id, normalizeArea } from './utils.js'
 
-const app = express()
+export const app = express()
 app.use(express.json({ limit: '2mb' }))
 app.use(cookieParser())
 app.use(
@@ -25,6 +25,18 @@ app.use(
 const loginWindowMs = 5 * 60 * 1000
 const loginLimit = 20
 const loginAttempts = new Map()
+let initPromise = null
+
+export function ensureInitialized() {
+  if (!initPromise) {
+    initPromise = (async () => {
+      await ensureSchema()
+      await ensureSeedUsers()
+      await ensureSeedVendors()
+    })()
+  }
+  return initPromise
+}
 
 function requireTrustedOrigin(req, res, next) {
   const origin = req.get('origin')
@@ -579,15 +591,15 @@ app.use((err, _req, res, _next) => {
 })
 
 async function start() {
-  await ensureSchema()
-  await ensureSeedUsers()
-  await ensureSeedVendors()
+  await ensureInitialized()
   app.listen(config.port, () => {
     console.log(`API running on http://localhost:${config.port}`)
   })
 }
 
-start().catch((err) => {
-  console.error('Failed to start API', err)
-  process.exit(1)
-})
+if (process.env.VERCEL !== '1') {
+  start().catch((err) => {
+    console.error('Failed to start API', err)
+    process.exit(1)
+  })
+}

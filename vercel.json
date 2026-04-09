@@ -1,6 +1,26 @@
 {
   "rewrites": [
     {
+      "source": "/health",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/auth/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/customer/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/admin/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/vendor/quote/(.*)",
+      "destination": "/api/index"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
