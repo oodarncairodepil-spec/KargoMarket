@@ -30,6 +30,11 @@ let initPromise = null
 export function ensureInitialized() {
   if (!initPromise) {
     initPromise = (async () => {
+      const shouldBootstrapAtRuntime =
+        process.env.RUNTIME_DB_BOOTSTRAP === '1' || process.env.RUNTIME_DB_BOOTSTRAP === 'true'
+      if (process.env.VERCEL === '1' && !shouldBootstrapAtRuntime) {
+        return
+      }
       await ensureSchema()
       await ensureSeedUsers()
       await ensureSeedVendors()
