@@ -13,7 +13,11 @@ app.use(express.json({ limit: '2mb' }))
 app.use(cookieParser())
 app.use(
   cors({
-    origin: config.appOrigin,
+    origin(origin, callback) {
+      if (!origin) return callback(null, true)
+      if (config.appOrigins.includes(origin)) return callback(null, true)
+      return callback(new Error('CORS origin not allowed'))
+    },
     credentials: true,
   }),
 )
@@ -24,7 +28,7 @@ const loginAttempts = new Map()
 
 function requireTrustedOrigin(req, res, next) {
   const origin = req.get('origin')
-  if (!origin || origin === config.appOrigin) return next()
+  if (!origin || config.appOrigins.includes(origin)) return next()
   return res.status(403).json({ error: 'invalid_origin' })
 }
 
