@@ -8,11 +8,14 @@ export function AuthBootstrap({ children }: { children: ReactNode }) {
   const hydrated = useAuthStore((s) => s.hydrated)
   useEffect(() => {
     void hydrateMe()
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'INITIAL_SESSION') return
       if (!session) {
         useAuthStore.setState({ user: null })
         return
       }
+      const current = useAuthStore.getState().user
+      if (current?.id === session.user.id) return
       void hydrateMe()
     })
     return () => {

@@ -98,6 +98,21 @@ function toIso(v) {
   return String(v)
 }
 
+/** Ringkas untuk daftar admin — tanpa alamat panjang, gambar base64, dll. */
+function mapAdminInquiryListRow(r) {
+  return {
+    id: r.id,
+    pickup: r.pickup,
+    destination: r.destination,
+    itemDescription: r.item_description,
+    status: r.status,
+    quotesReleasedToCustomer: Boolean(r.quotes_released_to_customer),
+    createdAt: toIso(r.created_at) ?? r.created_at,
+    customerName: r.customer_name,
+    quoteCount: Number(r.quote_count) || 0,
+  }
+}
+
 function mapInquiryRow(r) {
   const paidAt = r.paid_at != null ? toIso(r.paid_at) : undefined
   return {
@@ -185,8 +200,8 @@ app.get('/health', (_req, res) => {
 
 app.get('/auth/me', async (req, res, next) => {
   try {
-    const user = await resolveUserFromRequest(req)
-    return res.json({ user })
+    const { user, authError } = await resolveUserFromRequest(req)
+    return res.json({ user, authError: authError ?? null })
   } catch (err) {
     return next(err)
   }
@@ -462,26 +477,29 @@ app.post(
   },
 )
 
-app.get('/admin/inquiries', requireAuth(['admin']), async (_req, res, next) => {
+app.get('/admin/inquiries', requireAuth(['admin']), async (req, res, next) => {
   try {
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10))
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0)
+    const fetchLimit = limit + 1
     const { rows } = await query(
       `
-      SELECT i.*, u.name AS customer_name,
-             COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids,
+      SELECT i.id, i.pickup, i.destination, i.item_description, i.status, i.quotes_released_to_customer, i.created_at,
+             u.name AS customer_name,
              (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count
       FROM km_inquiries i
       JOIN user_profiles u ON u.id = i.created_by_user_id
-      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
-      GROUP BY i.id, u.name
       ORDER BY i.created_at DESC
+      LIMIT $1 OFFSET $2
       `,
+      [fetchLimit, offset],
     )
+    const hasMore = rows.length > limit
+    const slice = hasMore ? rows.slice(0, limit) : rows
     res.json({
-      inquiries: rows.map((r) => ({
-        ...mapInquiryRow(r),
-        customerName: r.customer_name,
-        quoteCount: Number(r.quote_count) || 0,
-      })),
+      inquiries: slice.map(mapAdminInquiryListRow),
+      hasMore,
+      nextOffset: offset + slice.length,
     })
   } catch (err) {
     next(err)

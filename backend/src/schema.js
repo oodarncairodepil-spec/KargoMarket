@@ -90,6 +90,22 @@ export async function ensureSchema() {
   `)
 
   await query(`
+    CREATE OR REPLACE FUNCTION public.km_lookup_user_profile(p_user_id uuid)
+    RETURNS TABLE(id uuid, role text, name text)
+    LANGUAGE sql
+    STABLE
+    SECURITY DEFINER
+    SET search_path = public
+    AS $fn$
+      SELECT u.id, u.role, u.name
+      FROM public.user_profiles u
+      WHERE u.id = p_user_id
+      LIMIT 1;
+    $fn$;
+  `)
+  await query(`REVOKE ALL ON FUNCTION public.km_lookup_user_profile(uuid) FROM PUBLIC`)
+
+  await query(`
     CREATE TABLE IF NOT EXISTS vendors (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

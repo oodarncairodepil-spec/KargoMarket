@@ -1,13 +1,32 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { SectionCard } from '../../components/ui/SectionCard'
 import { Spinner } from '../../components/ui/Spinner'
 import { apiClient } from '../../lib/apiClient'
 import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiryStatus'
-import type { Inquiry } from '../../types/models'
+import type { InquiryStatus } from '../../types/models'
 
-type AdminInquiryListItem = Inquiry & { customerName: string; quoteCount: number }
+/** Payload ringkas dari GET /admin/inquiries (tanpa alamat/gambar berat). */
+type AdminInquiryListItem = {
+  id: string
+  pickup: string
+  destination: string
+  itemDescription: string
+  status: InquiryStatus
+  quotesReleasedToCustomer: boolean
+  createdAt: string
+  customerName: string
+  quoteCount: number
+}
+
+type InquiriesPageResponse = {
+  inquiries?: AdminInquiryListItem[]
+  hasMore?: boolean
+  nextOffset?: number
+}
+
+const PAGE_SIZE = 10
 
 function formatInquiryCreatedAt(iso: string): string {
   try {
@@ -26,32 +45,73 @@ function formatInquiryCreatedAt(iso: string): string {
 export function AdminInquiryList() {
   const [inquiries, setInquiries] = useState<AdminInquiryListItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextOffset, setNextOffset] = useState(0)
   const [error, setError] = useState('')
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const loadingMoreRef = useRef(false)
 
-  useEffect(() => {
-    let mounted = true
-    void (async () => {
-      try {
-        setLoading(true)
-        setError('')
-        const res = (await apiClient.get('/admin/inquiries')) as { inquiries?: AdminInquiryListItem[] }
-        if (!mounted) return
-        setInquiries(Array.isArray(res.inquiries) ? res.inquiries : [])
-      } catch {
-        if (mounted) {
-          setError('Gagal memuat permintaan. Periksa login admin dan koneksi ke server.')
-          setInquiries([])
-        }
-      } finally {
-        if (mounted) setLoading(false)
+  const loadPage = useCallback(async (offset: number, append: boolean) => {
+    if (append) {
+      if (loadingMoreRef.current) return
+      loadingMoreRef.current = true
+      setLoadingMore(true)
+    } else {
+      setLoading(true)
+      setError('')
+    }
+    try {
+      const res = (await apiClient.get(
+        `/admin/inquiries?limit=${PAGE_SIZE}&offset=${offset}`,
+      )) as InquiriesPageResponse
+      const list = Array.isArray(res.inquiries) ? res.inquiries : []
+      if (append) {
+        setInquiries((p) => [...p, ...list])
+      } else {
+        setInquiries(list)
       }
-    })()
-    return () => {
-      mounted = false
+      setHasMore(Boolean(res.hasMore))
+      setNextOffset(typeof res.nextOffset === 'number' ? res.nextOffset : offset + list.length)
+    } catch {
+      if (!append) {
+        setError('Gagal memuat permintaan. Periksa login admin dan koneksi ke server.')
+        setInquiries([])
+      }
+      setHasMore(false)
+    } finally {
+      setLoading(false)
+      setLoadingMore(false)
+      loadingMoreRef.current = false
     }
   }, [])
 
-  if (loading) {
+  useEffect(() => {
+    void loadPage(0, false)
+  }, [loadPage])
+
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const ob = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries[0]?.isIntersecting &&
+          hasMore &&
+          !loading &&
+          !loadingMoreRef.current &&
+          nextOffset > 0
+        ) {
+          void loadPage(nextOffset, true)
+        }
+      },
+      { root: null, rootMargin: '240px', threshold: 0 },
+    )
+    ob.observe(el)
+    return () => ob.disconnect()
+  }, [hasMore, loading, nextOffset, loadPage])
+
+  if (loading && inquiries.length === 0) {
     return (
       <div className="flex min-h-[55vh] flex-col items-center justify-center gap-3 text-slate-600">
         <Spinner className="h-7 w-7" />
@@ -66,6 +126,13 @@ export function AdminInquiryList() {
 
   return (
     <>
+      {!loading && inquiries.length > 0 && (
+        <p className="mb-3 text-sm font-medium text-slate-700">
+          Menampilkan {inquiries.length} permintaan
+          {hasMore ? ' · Gulir ke bawah untuk memuat lebih banyak' : ''}
+        </p>
+      )}
+
       {inquiries.length === 0 && (
         <SectionCard className="text-center text-sm text-slate-600">Belum ada permintaan.</SectionCard>
       )}
@@ -102,6 +169,13 @@ export function AdminInquiryList() {
           )
         })}
       </div>
+
+      <div ref={sentinelRef} className="h-4 w-full shrink-0" aria-hidden />
+      {loadingMore && (
+        <div className="flex justify-center py-4 text-slate-600">
+          <Spinner className="h-6 w-6" />
+        </div>
+      )}
     </>
   )
 }

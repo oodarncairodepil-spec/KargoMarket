@@ -4,6 +4,7 @@ import { Card } from '../../components/Card'
 import { PageShell } from '../../components/PageShell'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
+import { authIssueMessage } from '../../lib/authMessages'
 import { useAuthStore } from '../../store/useAuthStore'
 
 export function LoginPage() {
@@ -41,14 +42,12 @@ export function LoginPage() {
         navigate(user.role === 'admin' ? '/admin' : '/customer/inquiries', { replace: true })
       }
     } catch (err) {
-      const code = err instanceof Error ? err.message : ''
-      if (code === 'no_profile') {
-        setLocalError(
-          'Akun Supabase Anda belum punya profil di aplikasi. Minta admin menambahkan baris di tabel user_profiles (id = UUID pengguna, role, name).',
-        )
-      } else {
-        setLocalError('Login gagal. Periksa email/password, Supabase Auth, dan koneksi ke API.')
-      }
+      const msg = err instanceof Error ? err.message : ''
+      const machineCode =
+        /^(server_misconfigured|invalid_token|profile_missing|api_unreachable|bad_response|session_invalid|no_profile|login_failed)$/.test(
+          msg,
+        ) || msg.startsWith('http_')
+      setLocalError(machineCode ? authIssueMessage(msg) : (msg || authIssueMessage('login_failed')))
     }
   }
 
@@ -78,7 +77,9 @@ export function LoginPage() {
             />
           </label>
           {(localError || storeError) && (
-            <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{localError || storeError}</p>
+            <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">
+              {localError || authIssueMessage(storeError)}
+            </p>
           )}
           <Button
             type="submit"

@@ -25,7 +25,7 @@ export function CustomerInquiryHistoryPage() {
             ? (res as { inquiries: Inquiry[] }).inquiries
             : []
         if (mounted) setItems(inquiries)
-      } catch (err) {
+      } catch {
         if (mounted) setItems([])
       } finally {
         if (mounted) setLoading(false)

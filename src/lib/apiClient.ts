@@ -3,10 +3,23 @@ import { supabase } from './supabase'
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:4000' : '/api')
 
+let authHeaderCache: { headers: Record<string, string>; until: number } = { headers: {}, until: 0 }
+
+/** Panggil setelah logout agar token tidak di-cache salah. */
+export function clearApiAuthHeaderCache() {
+  authHeaderCache = { headers: {}, until: 0 }
+}
+
 async function authHeaders(): Promise<Record<string, string>> {
+  const now = Date.now()
+  if (now < authHeaderCache.until && Object.keys(authHeaderCache.headers).length > 0) {
+    return authHeaderCache.headers
+  }
   const { data } = await supabase.auth.getSession()
   const t = data.session?.access_token
-  return t ? { Authorization: `Bearer ${t}` } : {}
+  const headers: Record<string, string> = t ? { Authorization: `Bearer ${t}` } : {}
+  authHeaderCache = { headers, until: now + 20_000 }
+  return headers
 }
 
 async function request(path: string, init?: RequestInit) {

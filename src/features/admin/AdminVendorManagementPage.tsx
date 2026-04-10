@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card } from '../../components/Card'
 import { Button } from '../../components/ui/Button'
+import { Input } from '../../components/ui/Input'
 import { Spinner } from '../../components/ui/Spinner'
 import { ui } from '../../lib/uiTokens'
 import { supabase } from '../../lib/supabase'
@@ -16,6 +17,66 @@ const dayOptions = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Mingg
 const cityOptions = ['Jakarta', 'Bandung', 'Surabaya', 'Semarang', 'Yogyakarta', 'Denpasar', 'Makassar', 'Medan', 'Balikpapan'] as const
 const pricingSchemes = ['Harga Nett', 'Fee (Komisi)'] as const
 const pricingMethods = ['Per kg', 'Per trip', 'Per Koli', 'Custom'] as const
+
+/** Tanpa kolom base64 / JSON berat — muat daftar jauh lebih cepat. Detail penuh diambil saat edit. */
+const VENDOR_LIST_COLUMNS =
+  'id,name,business_type,established_year,origin_cities,destination_cities,pic_name,whatsapp_number,email,owner_name,owner_identity_proof_name,service_types,specializations,vehicle_types,max_capacity,operational_days,operational_hours,pricing_scheme,pricing_method,supports_bidding,legal_nib_name,npwp_name,office_photo_name,office_maps_link,office_latitude,office_longitude,sla_response,insurance_terms,packing_fee_terms,other_fees_terms,payment_terms,tax_terms,tnc_accepted,created_at'
+
+const VENDOR_PAGE_SIZE = 10
+
+function escapeForIlike(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+}
+
+/** Koma memecah klausa `.or()` PostgREST — diganti spasi. */
+function sanitizeVendorSearchInput(s: string): string {
+  return s.replace(/,/g, ' ').trim()
+}
+
+function mapVendorRowToRegistration(row: Record<string, unknown>): VendorRegistration {
+  const fleetRaw = row.fleet_photos
+  return {
+    id: String(row.id),
+    companyName: (row.name as string) || '',
+    businessType: (row.business_type as VendorRegistration['businessType']) || 'CV',
+    establishedYear: (row.established_year as string) || undefined,
+    originCities: (row.origin_cities as string[]) || [],
+    destinationCities: (row.destination_cities as string[]) || [],
+    picName: (row.pic_name as string) || '',
+    whatsappNumber: (row.whatsapp_number as string) || '',
+    email: (row.email as string) || '',
+    ownerName: (row.owner_name as string) || '',
+    ownerIdentityProofName: (row.owner_identity_proof_name as string) || undefined,
+    ownerIdentityProofDataUrl: (row.owner_identity_proof_data_url as string) || undefined,
+    serviceTypes: (row.service_types as string[]) || [],
+    specializations: (row.specializations as string[]) || [],
+    vehicleTypes: (row.vehicle_types as VehicleType[]) || [],
+    maxCapacity: (row.max_capacity as string) || undefined,
+    operationalDays: (row.operational_days as string[]) || [],
+    operationalHours: (row.operational_hours as string) || '',
+    pricingScheme: (row.pricing_scheme as VendorRegistration['pricingScheme']) || 'Harga Nett',
+    pricingMethod: (row.pricing_method as VendorRegistration['pricingMethod']) || 'Per trip',
+    supportsBidding: Boolean(row.supports_bidding),
+    legalNibName: (row.legal_nib_name as string) || undefined,
+    legalNibDataUrl: (row.legal_nib_data_url as string) || undefined,
+    npwpName: (row.npwp_name as string) || undefined,
+    npwpDataUrl: (row.npwp_data_url as string) || undefined,
+    fleetPhotos: Array.isArray(fleetRaw) ? (fleetRaw as { name: string; dataUrl?: string }[]) : [],
+    officePhotoName: (row.office_photo_name as string) || '',
+    officePhotoDataUrl: (row.office_photo_data_url as string) || undefined,
+    officeMapsLink: (row.office_maps_link as string) || '',
+    officeLatitude: row.office_latitude != null ? Number(row.office_latitude) : undefined,
+    officeLongitude: row.office_longitude != null ? Number(row.office_longitude) : undefined,
+    slaResponse: (row.sla_response as string) || '',
+    insuranceTerms: (row.insurance_terms as string) || '',
+    packingFeeTerms: (row.packing_fee_terms as string) || '',
+    otherFeesTerms: (row.other_fees_terms as string) || '',
+    paymentTerms: (row.payment_terms as string) || '',
+    taxTerms: (row.tax_terms as string) || '',
+    tncAccepted: Boolean(row.tnc_accepted),
+    createdAt: (row.created_at as string) || new Date().toISOString(),
+  }
+}
 
 type InvalidField =
   | 'companyName'
@@ -129,6 +190,14 @@ export function AdminVendorManagementPage() {
   const [view, setView] = useState<'list' | 'form'>('list')
   const [vendorRegistrations, setVendorRegistrations] = useState<VendorRegistration[]>([])
   const [listLoading, setListLoading] = useState(true)
+  const [listLoadingMore, setListLoadingMore] = useState(false)
+  const [vendorSearchInput, setVendorSearchInput] = useState('')
+  const [vendorSearchDebounced, setVendorSearchDebounced] = useState('')
+  const [vendorNextPage, setVendorNextPage] = useState(0)
+  const [vendorHasMore, setVendorHasMore] = useState(true)
+  const [vendorTotalCount, setVendorTotalCount] = useState<number | null>(null)
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [editingVendorId, setEditingVendorId] = useState<string | null>(null)
   const [companyName, setCompanyName] = useState('')
   const [businessType, setBusinessType] = useState<(typeof businessTypes)[number] | ''>('')
@@ -197,63 +266,95 @@ export function AdminVendorManagementPage() {
   const [invalidField, setInvalidField] = useState<InvalidField | null>(null)
 
   useEffect(() => {
-    async function loadVendors() {
-      setListLoading(true)
-      const { data, error: loadError } = await supabase
-        .from('vendors')
-        .select('*')
-        .order('created_at', { ascending: false })
+    const t = setTimeout(() => setVendorSearchDebounced(vendorSearchInput), 400)
+    return () => clearTimeout(t)
+  }, [vendorSearchInput])
+
+  const fetchVendorsPage = useCallback(async (pageIndex: number, searchQ: string) => {
+    const from = pageIndex * VENDOR_PAGE_SIZE
+    const to = from + VENDOR_PAGE_SIZE - 1
+    let qb = supabase
+      .from('vendors')
+      .select(VENDOR_LIST_COLUMNS, { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(from, to)
+    const raw = sanitizeVendorSearchInput(searchQ)
+    if (raw.length > 0) {
+      const esc = escapeForIlike(raw)
+      const p = `%${esc}%`
+      qb = qb.or(`name.ilike.${p},email.ilike.${p},whatsapp_number.ilike.${p},pic_name.ilike.${p}`)
+    }
+    return qb
+  }, [])
+
+  const reloadVendorList = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) setListLoading(true)
+      setError('')
+      setVendorHasMore(true)
+      setVendorNextPage(0)
+      try {
+        const { data, error: loadError, count } = await fetchVendorsPage(0, vendorSearchDebounced)
+        if (loadError) {
+          setError(loadError.message)
+          setVendorRegistrations([])
+          setVendorHasMore(false)
+          setVendorTotalCount(null)
+          return
+        }
+        const mapped = (data || []).map((row) => mapVendorRowToRegistration(row as Record<string, unknown>))
+        setVendorRegistrations(mapped)
+        setVendorTotalCount(typeof count === 'number' ? count : null)
+        setVendorHasMore((data?.length ?? 0) === VENDOR_PAGE_SIZE)
+        setVendorNextPage(1)
+      } finally {
+        if (!opts?.silent) setListLoading(false)
+      }
+    },
+    [fetchVendorsPage, vendorSearchDebounced],
+  )
+
+  useEffect(() => {
+    void reloadVendorList()
+  }, [reloadVendorList])
+
+  const loadMoreVendors = useCallback(async () => {
+    if (listLoadingMore || !vendorHasMore || listLoading) return
+    setListLoadingMore(true)
+    setError('')
+    try {
+      const { data, error: loadError } = await fetchVendorsPage(vendorNextPage, vendorSearchDebounced)
       if (loadError) {
         setError(loadError.message)
-        setListLoading(false)
         return
       }
-      const mapped: VendorRegistration[] = (data || []).map((row) => ({
-        id: row.id,
-        companyName: row.name || '',
-        businessType: (row.business_type as VendorRegistration['businessType']) || 'CV',
-        establishedYear: row.established_year || undefined,
-        originCities: row.origin_cities || [],
-        destinationCities: row.destination_cities || [],
-        picName: row.pic_name || '',
-        whatsappNumber: row.whatsapp_number || '',
-        email: row.email || '',
-        ownerName: row.owner_name || '',
-        ownerIdentityProofName: row.owner_identity_proof_name || undefined,
-        ownerIdentityProofDataUrl: row.owner_identity_proof_data_url || undefined,
-        serviceTypes: row.service_types || [],
-        specializations: row.specializations || [],
-        vehicleTypes: (row.vehicle_types as VehicleType[]) || [],
-        maxCapacity: row.max_capacity || undefined,
-        operationalDays: row.operational_days || [],
-        operationalHours: row.operational_hours || '',
-        pricingScheme: (row.pricing_scheme as VendorRegistration['pricingScheme']) || 'Harga Nett',
-        pricingMethod: (row.pricing_method as VendorRegistration['pricingMethod']) || 'Per trip',
-        supportsBidding: Boolean(row.supports_bidding),
-        legalNibName: row.legal_nib_name || undefined,
-        legalNibDataUrl: row.legal_nib_data_url || undefined,
-        npwpName: row.npwp_name || undefined,
-        npwpDataUrl: row.npwp_data_url || undefined,
-        fleetPhotos: Array.isArray(row.fleet_photos) ? row.fleet_photos : [],
-        officePhotoName: row.office_photo_name || '',
-        officePhotoDataUrl: row.office_photo_data_url || undefined,
-        officeMapsLink: row.office_maps_link || '',
-        officeLatitude: row.office_latitude ?? undefined,
-        officeLongitude: row.office_longitude ?? undefined,
-        slaResponse: row.sla_response || '',
-        insuranceTerms: row.insurance_terms || '',
-        packingFeeTerms: row.packing_fee_terms || '',
-        otherFeesTerms: row.other_fees_terms || '',
-        paymentTerms: row.payment_terms || '',
-        taxTerms: row.tax_terms || '',
-        tncAccepted: Boolean(row.tnc_accepted),
-        createdAt: row.created_at || new Date().toISOString(),
-      }))
-      setVendorRegistrations(mapped)
-      setListLoading(false)
+      const rows = data || []
+      if (rows.length === 0) {
+        setVendorHasMore(false)
+        return
+      }
+      const mapped = rows.map((row) => mapVendorRowToRegistration(row as Record<string, unknown>))
+      setVendorRegistrations((prev) => [...prev, ...mapped])
+      setVendorHasMore(rows.length === VENDOR_PAGE_SIZE)
+      setVendorNextPage((p) => p + 1)
+    } finally {
+      setListLoadingMore(false)
     }
-    void loadVendors()
-  }, [])
+  }, [fetchVendorsPage, vendorNextPage, vendorSearchDebounced, vendorHasMore, listLoadingMore, listLoading])
+
+  useEffect(() => {
+    if (view !== 'list') return
+    const el = loadMoreSentinelRef.current
+    if (!el) return
+    const ob = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) void loadMoreVendors()
+      },
+      { root: null, rootMargin: '240px', threshold: 0 },
+    )
+    ob.observe(el)
+    return () => ob.disconnect()
+  }, [view, loadMoreVendors, vendorRegistrations.length, vendorHasMore])
 
   function fieldClass(key: InvalidField): string {
     return invalidField === key
@@ -467,6 +568,21 @@ export function AdminVendorManagementPage() {
     setViewMode('form')
   }
 
+  async function beginEditVendor(vendorId: string) {
+    setDetailLoading(true)
+    setError('')
+    try {
+      const { data, error: loadError } = await supabase.from('vendors').select('*').eq('id', vendorId).maybeSingle()
+      if (loadError || !data) {
+        setError(loadError?.message || 'Vendor tidak ditemukan.')
+        return
+      }
+      loadFormForEdit(mapVendorRowToRegistration(data as Record<string, unknown>))
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
@@ -478,6 +594,25 @@ export function AdminVendorManagementPage() {
       focusInvalidField(invalid.field)
       return
     }
+    const emailLower = email.trim().toLowerCase()
+    const whatsappTrimmed = whatsappNumber.trim()
+    let qEmail = supabase.from('vendors').select('id').ilike('email', emailLower).limit(1)
+    if (editingVendorId) qEmail = qEmail.neq('id', editingVendorId)
+    let qWa = supabase.from('vendors').select('id').eq('whatsapp_number', whatsappTrimmed).limit(1)
+    if (editingVendorId) qWa = qWa.neq('id', editingVendorId)
+    const [emailRes, waRes] = await Promise.all([qEmail.maybeSingle(), qWa.maybeSingle()])
+    if (emailRes.data?.id) {
+      setError('Email ini sudah terdaftar pada vendor lain. Gunakan email yang berbeda.')
+      setInvalidField('email')
+      focusInvalidField('email')
+      return
+    }
+    if (waRes.data?.id) {
+      setError('Nomor WhatsApp ini sudah terdaftar pada vendor lain.')
+      setInvalidField('whatsappNumber')
+      focusInvalidField('whatsappNumber')
+      return
+    }
     const payload = {
       id: editingVendorId || `v_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`,
       name: companyName.trim(),
@@ -486,8 +621,8 @@ export function AdminVendorManagementPage() {
       origin_cities: originCities,
       destination_cities: destinationCities,
       pic_name: picName.trim(),
-      whatsapp_number: whatsappNumber.trim(),
-      email: email.trim(),
+      whatsapp_number: whatsappTrimmed,
+      email: emailLower,
       owner_name: ownerName.trim(),
       owner_identity_proof_name: ownerIdentityProofName || null,
       owner_identity_proof_data_url: ownerIdentityProofDataUrl || null,
@@ -521,6 +656,13 @@ export function AdminVendorManagementPage() {
     const { error: upsertError } = await supabase.from('vendors').upsert(payload)
     if (upsertError) {
       const raw = upsertError.message || ''
+      const code = 'code' in upsertError ? String((upsertError as { code?: string }).code) : ''
+      if (code === '23505' || /duplicate key|unique constraint/i.test(raw)) {
+        setError(
+          'Email atau nomor WhatsApp sudah dipakai vendor lain (validasi database). Sesuaikan kontak atau edit vendor yang ada.',
+        )
+        return
+      }
       if (/401|unauthorized|invalid api key/i.test(raw)) {
         setError(
           'Supabase menolak request (401). Jalankan migration policy anon terbaru, lalu restart `npm run dev` agar env VITE terbaca ulang.',
@@ -530,53 +672,8 @@ export function AdminVendorManagementPage() {
       }
       return
     }
-    const createdAt = new Date().toISOString()
-    const mappedItem: VendorRegistration = {
-      id: payload.id,
-      companyName: payload.name,
-      businessType: payload.business_type,
-      establishedYear: payload.established_year || undefined,
-      originCities: payload.origin_cities,
-      destinationCities: payload.destination_cities,
-      picName: payload.pic_name,
-      whatsappNumber: payload.whatsapp_number,
-      email: payload.email,
-      ownerName: payload.owner_name,
-      ownerIdentityProofName: payload.owner_identity_proof_name || undefined,
-      ownerIdentityProofDataUrl: payload.owner_identity_proof_data_url || undefined,
-      serviceTypes: payload.service_types,
-      specializations: payload.specializations,
-      vehicleTypes: payload.vehicle_types as VehicleType[],
-      maxCapacity: payload.max_capacity || undefined,
-      operationalDays: payload.operational_days,
-      operationalHours: payload.operational_hours,
-      pricingScheme: payload.pricing_scheme,
-      pricingMethod: payload.pricing_method,
-      supportsBidding: payload.supports_bidding,
-      legalNibName: payload.legal_nib_name || undefined,
-      legalNibDataUrl: payload.legal_nib_data_url || undefined,
-      npwpName: payload.npwp_name || undefined,
-      npwpDataUrl: payload.npwp_data_url || undefined,
-      fleetPhotos: payload.fleet_photos as { name: string; dataUrl?: string }[],
-      officePhotoName: payload.office_photo_name,
-      officePhotoDataUrl: payload.office_photo_data_url || undefined,
-      officeMapsLink: payload.office_maps_link,
-      officeLatitude: payload.office_latitude ?? undefined,
-      officeLongitude: payload.office_longitude ?? undefined,
-      slaResponse: payload.sla_response,
-      insuranceTerms: payload.insurance_terms,
-      packingFeeTerms: payload.packing_fee_terms,
-      otherFeesTerms: payload.other_fees_terms,
-      paymentTerms: payload.payment_terms,
-      taxTerms: payload.tax_terms,
-      tncAccepted: payload.tnc_accepted,
-      createdAt,
-    }
-    setVendorRegistrations((prev) => {
-      const exists = prev.some((v) => v.id === mappedItem.id)
-      if (exists) return prev.map((v) => (v.id === mappedItem.id ? { ...v, ...mappedItem } : v))
-      return [mappedItem, ...prev]
-    })
+    setSuccess(`Data vendor "${payload.name}" disimpan.`)
+    await reloadVendorList({ silent: true })
     resetForm()
     setViewMode('list')
   }
@@ -605,18 +702,38 @@ export function AdminVendorManagementPage() {
   }, [officeLocationSearch])
 
   if (view === 'list') {
+    const searchActive = vendorSearchDebounced.trim().length > 0
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1">
+            <label className="block text-xs font-medium text-slate-600">Cari vendor</label>
+            <Input
+              className="mt-1"
+              value={vendorSearchInput}
+              onChange={(e) => setVendorSearchInput(e.target.value)}
+              placeholder="Nama, email, WhatsApp, atau PIC…"
+              autoComplete="off"
+            />
             {!listLoading && (
-              <p className="text-sm font-medium text-slate-700">Total vendor: {vendorRegistrations.length}</p>
+              <p className="mt-2 text-sm font-medium text-slate-700">
+                {vendorTotalCount != null
+                  ? `Menampilkan ${vendorRegistrations.length} dari ${vendorTotalCount} vendor${searchActive ? ' (hasil pencarian)' : ''}`
+                  : `Dimuat: ${vendorRegistrations.length} vendor`}
+                {vendorHasMore ? ' · Gulir ke bawah untuk memuat lebih banyak' : ''}
+              </p>
             )}
           </div>
-          <Button type="button" size="sm" onClick={() => setViewMode('form')}>
+          <Button type="button" size="sm" disabled={detailLoading} onClick={() => setViewMode('form')}>
             Tambah
           </Button>
         </div>
+        {detailLoading && (
+          <Card className="flex items-center gap-3 py-4">
+            <Spinner className="h-6 w-6 shrink-0" />
+            <p className="text-sm text-slate-700">Memuat data vendor untuk diedit…</p>
+          </Card>
+        )}
         <div className="flex flex-col gap-3">
           {listLoading ? (
             <div className="flex min-h-[55vh] flex-col items-center justify-center gap-3 text-slate-600">
@@ -625,28 +742,43 @@ export function AdminVendorManagementPage() {
             </div>
           ) : vendorRegistrations.length === 0 ? (
             <Card className="text-center">
-              <p className="text-sm font-semibold text-slate-900">Belum ada vendor</p>
-              <p className="mt-1 text-sm text-slate-600">Klik tombol `Tambah` untuk membuat vendor pertama.</p>
+              <p className="text-sm font-semibold text-slate-900">
+                {searchActive ? 'Tidak ada vendor yang cocok' : 'Belum ada vendor'}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                {searchActive
+                  ? 'Ubah kata kunci pencarian atau kosongkan kolom cari.'
+                  : 'Klik tombol `Tambah` untuk membuat vendor pertama.'}
+              </p>
             </Card>
           ) : (
-            vendorRegistrations.map((v) => (
-              <button
-                key={v.id}
-                type="button"
-                onClick={() => loadFormForEdit(v)}
-                className="text-left"
-              >
-                <Card className="text-left transition-transform active:scale-[0.99]">
-                <p className="font-semibold text-slate-900">{v.companyName}</p>
-                <p className="text-xs text-slate-600">
-                  {v.businessType} · PIC {v.picName} · WA {v.whatsappNumber}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Origin: {v.originCities.join(', ')} | Destination: {v.destinationCities.join(', ')}
-                </p>
-                </Card>
-              </button>
-            ))
+            <>
+              {vendorRegistrations.map((v) => (
+                <button
+                  key={v.id}
+                  type="button"
+                  disabled={detailLoading}
+                  onClick={() => void beginEditVendor(v.id)}
+                  className="text-left disabled:opacity-50"
+                >
+                  <Card className="text-left transition-transform active:scale-[0.99]">
+                    <p className="font-semibold text-slate-900">{v.companyName}</p>
+                    <p className="text-xs text-slate-600">
+                      {v.businessType} · PIC {v.picName} · WA {v.whatsappNumber}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Origin: {v.originCities.join(', ')} | Destination: {v.destinationCities.join(', ')}
+                    </p>
+                  </Card>
+                </button>
+              ))}
+              <div ref={loadMoreSentinelRef} className="h-4 w-full shrink-0" aria-hidden />
+              {listLoadingMore && (
+                <div className="flex justify-center py-4 text-slate-600">
+                  <Spinner className="h-6 w-6" />
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
