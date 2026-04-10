@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { InquiryRequestSummary } from '../../components/InquiryRequestSummary'
@@ -14,6 +14,7 @@ import {
 import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiryStatus'
 import { VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
 import { getVendorById } from '../../lib/matchVendors'
+import { uploadUserFile } from '../../lib/storageUpload'
 import type { Inquiry, QuoteSubmitPayload, VehicleType, VendorQuote } from '../../types/models'
 
 const inputClass = `mt-1 ${ui.form.input.compact}`
@@ -23,7 +24,7 @@ type AdminInquiryDetail = Inquiry & { customerName?: string }
 type AdminDetailResponse = {
   inquiry?: AdminInquiryDetail
   quotes?: VendorQuote[]
-  tokens?: { token: string; vendorId: string }[]
+  tokens?: { token: string; vendorId: string; vendorName?: string | null }[]
 }
 
 function vendorQuoteUrl(token: string) {
@@ -31,11 +32,20 @@ function vendorQuoteUrl(token: string) {
   return `${window.location.origin}/vendor/quote/${token}`
 }
 
+const VENDOR_QUOTE_FILTER_ALL = 'all' as const
+const VENDOR_QUOTE_FILTER_RESPONDED = 'responded' as const
+const VENDOR_QUOTE_FILTER_PENDING = 'pending' as const
+
+type VendorQuoteFilter =
+  | typeof VENDOR_QUOTE_FILTER_ALL
+  | typeof VENDOR_QUOTE_FILTER_RESPONDED
+  | typeof VENDOR_QUOTE_FILTER_PENDING
+
 export function AdminInquiryDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [inquiry, setInquiry] = useState<AdminInquiryDetail | null>(null)
   const [quotes, setQuotes] = useState<VendorQuote[]>([])
-  const [tokens, setTokens] = useState<{ token: string; vendorId: string }[]>([])
+  const [tokens, setTokens] = useState<{ token: string; vendorId: string; vendorName?: string | null }[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
@@ -48,6 +58,13 @@ export function AdminInquiryDetailPage() {
   const [manualInsurancePremiumDigits, setManualInsurancePremiumDigits] = useState('')
   const [manualNotes, setManualNotes] = useState('')
   const [toast, setToast] = useState('')
+  const [copiedQuoteToken, setCopiedQuoteToken] = useState<string | null>(null)
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [vendorSectionRefreshing, setVendorSectionRefreshing] = useState(false)
+  const [vendorQuoteFilter, setVendorQuoteFilter] = useState<VendorQuoteFilter>(VENDOR_QUOTE_FILTER_ALL)
+  const [vendorNameQuery, setVendorNameQuery] = useState('')
+  const [statusUpdating, setStatusUpdating] = useState(false)
+  const [paymentConfirmUploading, setPaymentConfirmUploading] = useState(false)
 
   const loadDetail = useCallback(async () => {
     if (!id) return
@@ -106,6 +123,38 @@ export function AdminInquiryDetailPage() {
     }
     return map
   }, [tokens])
+  const tokenNameByVendor = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const t of tokens) {
+      const n = t.vendorName?.trim()
+      if (n) map.set(t.vendorId, n)
+    }
+    return map
+  }, [tokens])
+
+  const filteredMatchedVendorIds = useMemo(() => {
+    if (!inquiry) return []
+    let ids = [...inquiry.matchedVendorIds]
+    if (vendorQuoteFilter === VENDOR_QUOTE_FILTER_RESPONDED) {
+      ids = ids.filter((vid) => quotes.some((q) => q.vendorId === vid))
+    } else if (vendorQuoteFilter === VENDOR_QUOTE_FILTER_PENDING) {
+      ids = ids.filter((vid) => !quotes.some((q) => q.vendorId === vid))
+    }
+    const q = vendorNameQuery.trim().toLowerCase()
+    if (q) {
+      ids = ids.filter((vid) => {
+        const v = getVendorById(vid)
+        return (v?.name ?? vid).toLowerCase().includes(q)
+      })
+    }
+    return ids
+  }, [inquiry, quotes, vendorQuoteFilter, vendorNameQuery])
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+    }
+  }, [])
 
   if (!id) {
     return (
@@ -210,11 +259,29 @@ export function AdminInquiryDetailPage() {
     const url = vendorQuoteUrl(token)
     try {
       await navigator.clipboard.writeText(url)
-      setToast('Tautan disalin.')
+      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      setCopiedQuoteToken(token)
+      copyResetTimerRef.current = setTimeout(() => {
+        setCopiedQuoteToken(null)
+        copyResetTimerRef.current = null
+      }, 2200)
     } catch {
       setToast('Gagal menyalin tautan.')
+      setTimeout(() => setToast(''), 2500)
     }
-    setTimeout(() => setToast(''), 2500)
+  }
+
+  async function refreshVendorQuotes() {
+    if (!id) return
+    setVendorSectionRefreshing(true)
+    try {
+      await loadDetail()
+    } catch {
+      setToast('Gagal memuat ulang penawaran.')
+      setTimeout(() => setToast(''), 2800)
+    } finally {
+      setVendorSectionRefreshing(false)
+    }
   }
 
   async function releaseToCustomer() {
@@ -226,6 +293,49 @@ export function AdminInquiryDetailPage() {
     } catch {
       setToast('Gagal melepas penawaran ke pelanggan.')
       setTimeout(() => setToast(''), 3000)
+    }
+  }
+
+  async function updateInquiryStatus(status: Inquiry['status']) {
+    setStatusUpdating(true)
+    try {
+      await apiClient.post(`/admin/inquiries/${inquiryId}/update-status`, { status })
+      await loadDetail()
+      setToast('Status diperbarui.')
+      setTimeout(() => setToast(''), 2500)
+    } catch {
+      setToast('Gagal memperbarui status.')
+      setTimeout(() => setToast(''), 2500)
+    } finally {
+      setStatusUpdating(false)
+    }
+  }
+
+  async function onUploadPaymentConfirmation(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0]
+    if (!file) return
+    setPaymentConfirmUploading(true)
+    const uploaded = await uploadUserFile('admin/payment-confirmation', file, { extraPath: inquiryId })
+    if ('error' in uploaded) {
+      setToast(uploaded.error)
+      setTimeout(() => setToast(''), 2800)
+      setPaymentConfirmUploading(false)
+      ev.target.value = ''
+      return
+    }
+    try {
+      await apiClient.post(`/admin/inquiries/${inquiryId}/confirm-payment`, {
+        confirmationImageUrl: uploaded.url,
+      })
+      await loadDetail()
+      setToast('Bukti konfirmasi pembayaran tersimpan.')
+      setTimeout(() => setToast(''), 2800)
+    } catch {
+      setToast('Gagal menyimpan konfirmasi pembayaran.')
+      setTimeout(() => setToast(''), 2800)
+    } finally {
+      setPaymentConfirmUploading(false)
+      ev.target.value = ''
     }
   }
 
@@ -250,6 +360,45 @@ export function AdminInquiryDetailPage() {
           <InquiryRequestSummary inquiry={inquiry} />
         </div>
       </SectionCard>
+      <SectionCard className="text-left">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Status proses</p>
+        <p className="mt-1 text-sm text-slate-700">{inquiryStatusLabel(inquiry.status)}</p>
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {(['awaiting_quotes','awaiting_payment','paid','payment_confirmed','in_transit','cancelled','completed'] as Inquiry['status'][]).map((s) => (
+            <Button
+              key={s}
+              type="button"
+              size="sm"
+              variant={inquiry.status === s ? 'neutralDark' : 'secondary'}
+              disabled={statusUpdating}
+              onClick={() => void updateInquiryStatus(s)}
+            >
+              {inquiryStatusLabel(s)}
+            </Button>
+          ))}
+        </div>
+      </SectionCard>
+
+      {inquiry.payment?.proofDataUrl && (
+        <SectionCard className="text-left">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Bukti bayar customer</p>
+          <a href={inquiry.payment.proofDataUrl} target="_blank" rel="noreferrer" className="mt-1 inline-block text-sm font-semibold text-accent">
+            Buka bukti transfer
+          </a>
+          {/^https?:.*\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(inquiry.payment.proofDataUrl) && (
+            <img src={inquiry.payment.proofDataUrl} alt="Bukti bayar" className="mt-3 max-h-56 w-full rounded-xl border border-slate-200 object-contain" />
+          )}
+          <div className="mt-3">
+            <p className="text-sm font-medium text-slate-700">Upload konfirmasi pembayaran admin</p>
+            <input type="file" accept="image/*,.pdf" disabled={paymentConfirmUploading} onChange={(e) => void onUploadPaymentConfirmation(e)} className="mt-2 block w-full min-h-12 text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-accent-soft file:px-4 file:py-2 file:text-sm file:font-semibold file:text-accent disabled:opacity-50" />
+            {inquiry.paymentConfirmationImageUrl && (
+              <a href={inquiry.paymentConfirmationImageUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-sm font-semibold text-accent">
+                Lihat bukti konfirmasi admin
+              </a>
+            )}
+          </div>
+        </SectionCard>
+      )}
 
       {quotes.length > 0 && inquiry.quotesReleasedToCustomer === false && (
         <SectionCard className="border-amber-200 bg-amber-50/70 text-left text-sm text-amber-950">
@@ -269,37 +418,111 @@ export function AdminInquiryDetailPage() {
         </p>
       )}
 
-      <h2 className="text-left text-sm font-semibold uppercase tracking-wide text-slate-500">
-        Vendor & penawaran
-      </h2>
+      <div className="flex items-start justify-between gap-3">
+        <h2 className="text-left text-sm font-semibold uppercase tracking-wide text-slate-500">
+          Vendor & penawaran
+        </h2>
+        <button
+          type="button"
+          aria-label="Muat ulang daftar vendor dan penawaran"
+          disabled={vendorSectionRefreshing}
+          onClick={() => void refreshVendorQuotes()}
+          className="shrink-0 rounded-lg p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            className={`h-5 w-5 ${vendorSectionRefreshing ? 'animate-spin' : ''}`}
+            fill="none"
+            aria-hidden
+          >
+            <path
+              d="M21 12a9 9 0 1 1-2.64-6.36"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            />
+            <path d="M21 3v6h-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="text-left text-xs font-medium text-slate-600">Status penawaran</span>
+          <select
+            className={inputClass}
+            value={vendorQuoteFilter}
+            onChange={(e) => setVendorQuoteFilter(e.target.value as VendorQuoteFilter)}
+          >
+            <option value={VENDOR_QUOTE_FILTER_ALL}>Semua vendor</option>
+            <option value={VENDOR_QUOTE_FILTER_RESPONDED}>Sudah ada penawaran</option>
+            <option value={VENDOR_QUOTE_FILTER_PENDING}>Belum merespons</option>
+          </select>
+        </label>
+        <label className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="text-left text-xs font-medium text-slate-600">Cari nama vendor</span>
+          <input
+            type="search"
+            className={inputClass}
+            value={vendorNameQuery}
+            onChange={(e) => setVendorNameQuery(e.target.value)}
+            placeholder="Ketik nama…"
+            autoComplete="off"
+          />
+        </label>
+      </div>
+
+      {filteredMatchedVendorIds.length === 0 && (
+        <p className="text-left text-sm text-slate-600">Tidak ada vendor yang cocok dengan filter.</p>
+      )}
 
       <div className="flex flex-col gap-3">
-        {inquiry.matchedVendorIds.map((vid) => {
+        {filteredMatchedVendorIds.map((vid) => {
           const vendor = getVendorById(vid)
-          const name = vendor?.name ?? vid
+          const name = tokenNameByVendor.get(vid) || vendor?.name || vid
           const token = tokensByVendor.get(vid)
           const quote = quotes.find((q) => q.vendorId === vid)
+          const hasQuote = Boolean(quote)
 
           return (
-            <SectionCard key={vid} className="text-left">
+            <SectionCard
+              key={vid}
+              className={`text-left transition-colors ${
+                hasQuote
+                  ? 'border-emerald-200/90 bg-emerald-50/45 shadow-sm'
+                  : 'border-amber-200/85 bg-amber-50/40 shadow-sm'
+              }`}
+            >
               <button
                 type="button"
                 onClick={() => openManual(vid)}
                 className="flex w-full items-center justify-between gap-2 text-left"
               >
                 <div className="min-w-0">
-                  <p className="truncate font-semibold text-slate-900">{name}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate font-semibold text-slate-900">{name}</p>
+                    <Badge variant={hasQuote ? 'success' : 'neutral'} className="text-[10px]">
+                      {hasQuote ? 'Sudah merespons' : 'Belum merespons'}
+                    </Badge>
+                  </div>
                   <p className="mt-1 text-xs text-slate-500">
                     Harga: {quote ? formatIDR(quote.price) : '—'} • ETA: {quote?.eta || '—'} • Jemput:{' '}
                     {quote?.pickupDate || '—'}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {expandedVendor === vid ? <span className="text-xs text-accent">Tutup</span> : null}
+                  <svg
+                    viewBox="0 0 24 24"
+                    className={`h-4 w-4 text-accent transition-transform ${expandedVendor === vid ? 'rotate-180' : ''}`}
+                    fill="none"
+                    aria-hidden
+                  >
+                    <path d="m7 10 5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 </div>
               </button>
 
-              {quote && (
+              {expandedVendor === vid && quote && (
                 <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
                   <p className="font-bold text-accent">{formatIDR(quote.price)}</p>
                   <p className="mt-1">ETA: {quote.eta}</p>
@@ -315,33 +538,51 @@ export function AdminInquiryDetailPage() {
                 </div>
               )}
 
-              {token && (
+              {expandedVendor === vid && token && (
                 <div className="mt-3 flex min-w-0 items-center gap-1 rounded-lg bg-slate-50 p-2">
                   <p className="min-w-0 flex-1 truncate text-xs text-slate-500">{vendorQuoteUrl(token)}</p>
                   <button
                     type="button"
-                    aria-label="Salin tautan ke clipboard"
-                    className="shrink-0 rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-accent"
+                    aria-label={
+                      copiedQuoteToken === token ? 'Tautan sudah disalin' : 'Salin tautan ke clipboard'
+                    }
+                    className={`shrink-0 rounded-md p-2 transition-colors ${
+                      copiedQuoteToken === token
+                        ? 'text-emerald-600 hover:bg-emerald-50'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-accent'
+                    }`}
                     onClick={() => void copyVendorQuoteLink(token)}
                   >
-                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden>
-                      <rect
-                        x="9"
-                        y="9"
-                        width="13"
-                        height="13"
-                        rx="2"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                      />
-                      <path
-                        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
+                    {copiedQuoteToken === token ? (
+                      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden>
+                        <path
+                          d="M20 6 9 17l-5-5"
+                          stroke="currentColor"
+                          strokeWidth="2.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden>
+                        <rect
+                          x="9"
+                          y="9"
+                          width="13"
+                          height="13"
+                          rx="2"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                        />
+                        <path
+                          d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    )}
                   </button>
                   <button
                     type="button"

@@ -4,9 +4,8 @@ import { Card } from '../../components/Card'
 import { PageShell } from '../../components/PageShell'
 import { StickyCTA } from '../../components/StickyCTA'
 import { apiClient } from '../../lib/apiClient'
+import { uploadUserFile } from '../../lib/storageUpload'
 import type { Inquiry } from '../../types/models'
-
-const MAX_FILE_BYTES = 350 * 1024
 
 export function InquiryPaymentPage() {
   const { id } = useParams<{ id: string }>()
@@ -15,7 +14,10 @@ export function InquiryPaymentPage() {
   const [submitting, setSubmitting] = useState(false)
 
   const [fileName, setFileName] = useState('')
-  const [preview, setPreview] = useState<string | null>(null)
+  /** URL publik Supabase setelah unggah (dikirim ke API sebagai proofDataUrl). */
+  const [proofPublicUrl, setProofPublicUrl] = useState<string | null>(null)
+  const [proofKind, setProofKind] = useState<'image' | 'pdf' | null>(null)
+  const [uploadingProof, setUploadingProof] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -90,39 +92,53 @@ export function InquiryPaymentPage() {
 
   const alreadyPaid = inquiry.status === 'paid' && payment
 
-  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     setError('')
     const file = e.target.files?.[0]
     if (!file) {
       setFileName('')
-      setPreview(null)
+      setProofPublicUrl(null)
+      setProofKind(null)
       return
     }
-    if (file.size > MAX_FILE_BYTES) {
-      setError('File terlalu besar. Maksimal sekitar 350 KB untuk unggahan.')
+    const isImage = file.type.startsWith('image/')
+    const isPdf = file.type === 'application/pdf'
+    if (!isImage && !isPdf) {
+      setError('Hanya gambar atau PDF yang diperbolehkan.')
       setFileName('')
-      setPreview(null)
+      setProofPublicUrl(null)
+      setProofKind(null)
+      e.target.value = ''
       return
     }
+    setUploadingProof(true)
     setFileName(file.name)
-    const reader = new FileReader()
-    reader.onload = () => {
-      setPreview(typeof reader.result === 'string' ? reader.result : null)
+    const res = await uploadUserFile('payments', file, { extraPath: inquiryId })
+    setUploadingProof(false)
+    if ('error' in res) {
+      setError(res.error)
+      setFileName('')
+      setProofPublicUrl(null)
+      setProofKind(null)
+      e.target.value = ''
+      return
     }
-    reader.readAsDataURL(file)
+    setProofPublicUrl(res.url)
+    setProofKind(isPdf ? 'pdf' : 'image')
+    e.target.value = ''
   }
 
   async function submit() {
     setError('')
-    if (!fileName) {
-      setError('Pilih file bukti pembayaran.')
+    if (!fileName || !proofPublicUrl) {
+      setError(uploadingProof ? 'Tunggu unggah selesai.' : 'Pilih file bukti pembayaran dan pastikan unggah berhasil.')
       return
     }
     setSubmitting(true)
     try {
       const res = (await apiClient.post(`/customer/inquiries/${inquiryId}/confirm-payment`, {
         proofFileName: fileName,
-        proofDataUrl: preview,
+        proofDataUrl: proofPublicUrl,
       })) as { inquiry?: Inquiry }
       if (res.inquiry) setInquiry(res.inquiry)
     } catch {
@@ -148,7 +164,7 @@ export function InquiryPaymentPage() {
               <p className="font-semibold">Vendor telah diberi tahu (simulasi).</p>
               <p className="mt-2 text-emerald-800">
                 Bukti: {payment.proofFileName}
-                {payment.proofDataUrl ? ' (tersimpan ringkas)' : ' (hanya nama file — file terlalu besar untuk disimpan)'}
+                {payment.proofDataUrl ? ' (URL bukti tersimpan)' : ' (tanpa URL bukti)'}
               </p>
             </Card>
             <Link
@@ -163,10 +179,13 @@ export function InquiryPaymentPage() {
         {!alreadyPaid && (
           <>
             <p className="text-left text-sm text-slate-600">
-              Unggah bukti transfer (simulasi). Bukti disimpan di server bersama permintaan Anda.
+              Unggah bukti transfer. File disimpan di Supabase Storage; URL disimpan bersama permintaan Anda.
             </p>
             {error && (
-              <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-100">
+              <p
+                className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-100"
+                role="alert"
+              >
                 {error}
               </p>
             )}
@@ -175,13 +194,30 @@ export function InquiryPaymentPage() {
               <input
                 type="file"
                 accept="image/*,.pdf"
-                onChange={onFile}
-                className="mt-2 block w-full min-h-12 text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-accent-soft file:px-4 file:py-2 file:text-sm file:font-semibold file:text-accent"
+                disabled={uploadingProof}
+                onChange={(ev) => void onFile(ev)}
+                className="mt-2 block w-full min-h-12 text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-accent-soft file:px-4 file:py-2 file:text-sm file:font-semibold file:text-accent disabled:opacity-50"
               />
             </label>
-            {preview && preview.startsWith('data:image') && (
+            {uploadingProof && (
+              <p className="text-left text-sm text-slate-600">Mengunggah ke penyimpanan…</p>
+            )}
+            {proofKind === 'image' && proofPublicUrl && (
               <Card className="overflow-hidden p-0">
-                <img src={preview} alt="Pratinjau bukti" className="max-h-48 w-full object-contain" />
+                <img src={proofPublicUrl} alt="Pratinjau bukti" className="max-h-48 w-full object-contain" />
+              </Card>
+            )}
+            {proofKind === 'pdf' && proofPublicUrl && (
+              <Card className="text-left text-sm text-slate-700">
+                <p>PDF terunggah: {fileName}</p>
+                <a
+                  href={proofPublicUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-block font-medium text-accent"
+                >
+                  Buka file
+                </a>
               </Card>
             )}
           </>
@@ -192,7 +228,7 @@ export function InquiryPaymentPage() {
         <StickyCTA aboveBottomNav>
           <button
             type="button"
-            disabled={submitting}
+            disabled={submitting || uploadingProof || !proofPublicUrl}
             onClick={() => void submit()}
             className="w-full min-h-12 rounded-xl bg-accent text-base font-semibold text-white shadow-md disabled:opacity-50"
           >

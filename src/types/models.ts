@@ -6,6 +6,9 @@ export type InquiryStatus =
   | 'vendor_selected'
   | 'awaiting_payment'
   | 'paid'
+  | 'payment_confirmed'
+  | 'in_transit'
+  | 'cancelled'
   | 'completed'
 
 export interface User {
@@ -49,7 +52,8 @@ export interface VendorRegistration {
   legalNibDataUrl?: string
   npwpName?: string
   npwpDataUrl?: string
-  fleetPhotos: { name: string; dataUrl?: string }[]
+  /** `dataUrl` berisi URL publik atau data URL lama (nama kolom DB tetap JSON fleksibel). */
+  fleetPhotos: { name: string; dataUrl?: string; url?: string }[]
   officePhotoName: string
   officePhotoDataUrl?: string
   officeMapsLink: string
@@ -62,6 +66,7 @@ export interface VendorRegistration {
   paymentTerms: string
   taxTerms: string
   tncAccepted: boolean
+  isActive: boolean
   createdAt: string
 }
 
@@ -95,7 +100,7 @@ export interface Inquiry {
   lengthCm?: string
   widthCm?: string
   heightCm?: string
-  /** Data URL gambar barang (mock, batas ukuran di form) */
+  /** URL publik gambar barang (Supabase Storage) atau data URL lama */
   itemImageUrls?: string[]
   specialRequirements: string
   /** Tanggal penjemputan yang diharapkan (YYYY-MM-DD) */
@@ -120,6 +125,10 @@ export interface Inquiry {
   quotesReleasedToCustomer?: boolean
   /** Terset dari API setelah konfirmasi bayar (bukan Zustand). */
   payment?: Payment
+  quoteCount?: number
+  matchedVendorCount?: number
+  paymentConfirmationImageUrl?: string
+  paymentConfirmedAt?: string
 }
 
 export interface VendorTokenEntry {

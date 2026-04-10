@@ -31,7 +31,7 @@ export function VendorIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className={className}>
       <path
-        d="M3 10.5 12 4l9 6.5M5 10v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8M9 20v-5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v5"
+        d="M3 8h11v7H3V8Zm11 2h3l3 3v2h-6v-5ZM7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm10 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM5 15h2m8 0h2"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"

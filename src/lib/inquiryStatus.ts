@@ -8,7 +8,10 @@ export function inquiryStatusLabel(s: InquiryStatus): string {
     quotes_ready: 'Penawaran siap',
     vendor_selected: 'Vendor dipilih',
     awaiting_payment: 'Menunggu pembayaran',
-    paid: 'Lunas',
+    paid: 'Menunggu verifikasi pembayaran',
+    payment_confirmed: 'Pembayaran terkonfirmasi',
+    in_transit: 'Dalam pengiriman',
+    cancelled: 'Dibatalkan',
     completed: 'Selesai',
   }
   return map[s]
@@ -17,8 +20,10 @@ export function inquiryStatusLabel(s: InquiryStatus): string {
 export function inquiryStatusBadgeVariant(
   s: InquiryStatus,
 ): 'pending' | 'success' | 'info' | 'neutral' {
-  if (s === 'paid' || s === 'completed') return 'success'
+  if (s === 'payment_confirmed' || s === 'completed') return 'success'
+  if (s === 'in_transit') return 'info'
+  if (s === 'cancelled') return 'neutral'
   if (s === 'quotes_ready' || s === 'vendor_selected') return 'info'
-  if (s === 'awaiting_quotes' || s === 'awaiting_payment' || s === 'matching') return 'pending'
+  if (s === 'awaiting_quotes' || s === 'awaiting_payment' || s === 'matching' || s === 'paid') return 'pending'
   return 'neutral'
 }

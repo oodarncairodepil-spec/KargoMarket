@@ -15,6 +15,7 @@ import {
   sanitizeWeightInput,
 } from '../../lib/inquiryFormHelpers'
 import { SPECIAL_TREATMENTS, TNC_SUMMARY_LINES, VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
+import { uploadUserFile } from '../../lib/storageUpload'
 import { useAuthStore } from '../../store/useAuthStore'
 import type { SpecialTreatmentType, VehicleType } from '../../types/models'
 
@@ -103,6 +104,7 @@ export function InquiryNewPage() {
   const [error, setError] = useState('')
   const [invalidField, setInvalidField] = useState<InvalidField | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [uploadingItemImages, setUploadingItemImages] = useState(false)
 
   function fieldClass(field: InvalidField | null, key: InvalidField): string {
     if (field === key) return `${inputClass} ${invalidRing}`
@@ -271,7 +273,7 @@ export function InquiryNewPage() {
     setStep((s) => (s > 0 ? ((s - 1) as Step) : s))
   }
 
-  function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
     setError('')
     const files = e.target.files
     if (!files?.length) return
@@ -292,33 +294,27 @@ export function InquiryNewPage() {
     }
     const tooBig = toAdd.find((f) => f.size > MAX_ITEM_IMAGE_BYTES)
     if (tooBig) {
-      setError(`Tiap gambar maks. ~${Math.round(MAX_ITEM_IMAGE_BYTES / 1024)} KB (penyimpanan lokal).`)
+      setError(
+        `Tiap gambar maksimal ${Math.round(MAX_ITEM_IMAGE_BYTES / (1024 * 1024))} MB (Supabase Storage).`,
+      )
       e.target.value = ''
       return
     }
 
-    void Promise.all(
-      toAdd.map(
-        (file, idx) =>
-          new Promise<{ idx: number; url: string }>((resolve, reject) => {
-            const reader = new FileReader()
-            reader.onload = () => {
-              if (typeof reader.result === 'string') {
-                resolve({ idx, url: reader.result })
-              } else {
-                reject(new Error('read'))
-              }
-            }
-            reader.onerror = () => reject(reader.error)
-            reader.readAsDataURL(file)
-          }),
-      ),
-    )
-      .then((results) => {
-        results.sort((a, b) => a.idx - b.idx)
-        setItemImageUrls((prev) => [...prev, ...results.map((r) => r.url)])
-      })
-      .catch(() => setError('Gagal membaca salah satu gambar.'))
+    setUploadingItemImages(true)
+    const urls: string[] = []
+    for (const file of toAdd) {
+      const res = await uploadUserFile('inquiries/goods', file)
+      if ('error' in res) {
+        setError(res.error)
+        setUploadingItemImages(false)
+        e.target.value = ''
+        return
+      }
+      urls.push(res.url)
+    }
+    setItemImageUrls((prev) => [...prev, ...urls])
+    setUploadingItemImages(false)
     e.target.value = ''
   }
 
@@ -586,17 +582,18 @@ export function InquiryNewPage() {
             <div>
               <span className="text-sm font-medium text-slate-700">Foto barang (opsional)</span>
               <p className="mt-0.5 text-xs text-slate-500">
-                Unggah hingga {MAX_ITEM_IMAGES} gambar. Ukuran tiap file maksimal sekitar{' '}
-                {Math.round(MAX_ITEM_IMAGE_BYTES / 1024)} KB (disimpan di perangkat Anda).
+                Unggah hingga {MAX_ITEM_IMAGES} gambar ke penyimpanan cloud (maks.{' '}
+                {Math.round(MAX_ITEM_IMAGE_BYTES / (1024 * 1024))} MB per file).
               </p>
               <div className="mt-2 flex min-h-12 items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
                 <p className="min-w-0 flex-1 text-sm text-slate-600">{fileSummary}</p>
                 <button
                   type="button"
+                  disabled={uploadingItemImages}
                   onClick={() => fileInputRef.current?.click()}
-                  className="shrink-0 rounded-lg bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent"
+                  className="shrink-0 rounded-lg bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent disabled:opacity-50"
                 >
-                  Pilih gambar
+                  {uploadingItemImages ? 'Mengunggah…' : 'Pilih gambar'}
                 </button>
               </div>
               <input
@@ -604,7 +601,8 @@ export function InquiryNewPage() {
                 type="file"
                 accept="image/*"
                 multiple
-                onChange={onPickImages}
+                disabled={uploadingItemImages}
+                onChange={(ev) => void onPickImages(ev)}
                 className="sr-only"
                 aria-label="Pilih file gambar barang"
               />
@@ -612,7 +610,7 @@ export function InquiryNewPage() {
                 <ul className="mt-3 grid grid-cols-3 gap-2">
                   {itemImageUrls.map((url, i) => (
                     <li
-                      key={`${i}-${url.slice(0, 24)}`}
+                      key={`${i}-${url.slice(-48)}`}
                       className="relative aspect-square overflow-hidden rounded-xl border border-slate-200 bg-slate-50"
                     >
                       <img src={url} alt="" className="h-full w-full object-cover" />
@@ -940,32 +938,6 @@ export function InquiryNewPage() {
                 </span>
               </label>
             </div>
-          </div>
-        )}
-
-        {(step > 0 || step === 3) && (
-          <div className="mt-2 flex gap-2">
-            {step > 0 && (
-              <button
-                type="button"
-                onClick={back}
-                className="min-h-12 flex-1 rounded-xl border border-slate-200 bg-white text-base font-semibold text-slate-800 shadow-sm"
-              >
-                Kembali
-              </button>
-            )}
-            {step === 3 && (
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => {
-                  void handleSubmit()
-                }}
-                className="min-h-12 flex-[2] rounded-xl bg-accent text-base font-semibold text-white shadow-md disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {submitting ? 'Mengirim…' : 'Kirim permintaan'}
-              </button>
-            )}
           </div>
         )}
       </div>

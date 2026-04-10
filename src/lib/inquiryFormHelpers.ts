@@ -63,7 +63,8 @@ export function formatDimensionsCm(lengthCm: string, widthCm: string, heightCm: 
 }
 
 export const MAX_ITEM_IMAGES = 5
-export const MAX_ITEM_IMAGE_BYTES = 220 * 1024
+/** Selaras dengan batas unggah Supabase Storage (`20260414_storage_kargomarket_uploads.sql`). */
+export const MAX_ITEM_IMAGE_BYTES = 10 * 1024 * 1024
 
 export function formatWeightDisplay(weight: string): string {
   const t = weight.trim()

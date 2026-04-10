@@ -68,6 +68,7 @@ export function InquiryQuotesPage() {
   const [insuranceOnly, setInsuranceOnly] = useState(false)
   const [vehicleFilter, setVehicleFilter] = useState<VehicleType | 'all'>('all')
   const [pickId, setPickId] = useState<string | null>(null)
+  const [showConfirmPick, setShowConfirmPick] = useState(false)
 
   const releasedToCustomer = inquiry ? inquiry.quotesReleasedToCustomer !== false : false
 
@@ -248,7 +249,10 @@ export function InquiryQuotesPage() {
         )}
 
         <div className="flex flex-col gap-4">
-          {sorted.map((q) => {
+          {(inquiry.selectedQuoteId
+            ? sorted.filter((q) => q.id === inquiry.selectedQuoteId)
+            : sorted
+          ).map((q) => {
             const vendor = getVendorById(q.vendorId)
             const name = vendor?.name ?? 'Vendor'
             const rating = vendor?.customerRating ?? 0
@@ -359,7 +363,7 @@ export function InquiryQuotesPage() {
           <Button
             type="button"
             disabled={!activePickId}
-            onClick={onConfirmChoice}
+            onClick={() => setShowConfirmPick(true)}
             variant="neutralDark"
             size="lg"
             fullWidth
@@ -367,6 +371,24 @@ export function InquiryQuotesPage() {
             Konfirmasi pilihan penawaran
           </Button>
         </StickyCTA>
+      )}
+      {showConfirmPick && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30 px-4">
+          <SectionCard className="w-full max-w-md text-left">
+            <p className="font-semibold text-slate-900">Konfirmasi pilihan vendor</p>
+            <p className="mt-2 text-sm text-slate-600">
+              Setelah dipilih, penawaran lain akan disembunyikan dari tampilan utama.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <Button type="button" variant="secondary" className="flex-1" onClick={() => setShowConfirmPick(false)}>
+                Batal
+              </Button>
+              <Button type="button" className="flex-1" onClick={() => void onConfirmChoice()}>
+                Ya, pilih
+              </Button>
+            </div>
+          </SectionCard>
+        </div>
       )}
     </>
   )

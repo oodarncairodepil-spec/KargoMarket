@@ -48,20 +48,38 @@ export function CustomerInquiryHistoryPage() {
         <SectionCard className="text-center text-sm text-slate-600">Belum ada permintaan.</SectionCard>
       ) : (
         <div className="flex flex-col gap-3">
-          {items.map((inq) => (
-            <Link key={inq.id} to={`/customer/inquiry/${inq.id}`}>
-              <SectionCard className="text-left">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold text-slate-900">
-                    {inq.pickup} → {inq.destination}
-                  </p>
-                  <Badge variant={inquiryStatusBadgeVariant(inq.status)}>{inquiryStatusLabel(inq.status)}</Badge>
-                </div>
-                <p className="mt-2 line-clamp-2 text-sm text-slate-600">{inq.itemDescription}</p>
-                <p className="mt-2 text-xs text-slate-500">{new Date(inq.createdAt).toLocaleString('id-ID')}</p>
-              </SectionCard>
-            </Link>
-          ))}
+          {items.map((inq) => {
+            const thumb = inq.itemImageUrls?.find(
+              (u) => typeof u === 'string' && (u.startsWith('http') || u.startsWith('data:image')),
+            )
+            return (
+              <Link key={inq.id} to={`/customer/inquiry/${inq.id}`}>
+                <SectionCard className="text-left">
+                  <div className={thumb ? 'flex gap-3' : ''}>
+                    {thumb ? (
+                      <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+                        <img src={thumb} alt="" className="h-full w-full object-cover" />
+                      </div>
+                    ) : null}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-semibold text-slate-900">
+                          {inq.pickup} → {inq.destination}
+                        </p>
+                        <Badge variant={(inq.quoteCount || 0) > 0 ? 'success' : inquiryStatusBadgeVariant(inq.status)}>
+                          {(inq.quoteCount || 0) > 0
+                            ? `Respon vendor: ${inq.quoteCount}`
+                            : inquiryStatusLabel(inq.status)}
+                        </Badge>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-sm text-slate-600">{inq.itemDescription}</p>
+                      <p className="mt-2 text-xs text-slate-500">{new Date(inq.createdAt).toLocaleString('id-ID')}</p>
+                    </div>
+                  </div>
+                </SectionCard>
+              </Link>
+            )
+          })}
         </div>
       )}
     </>

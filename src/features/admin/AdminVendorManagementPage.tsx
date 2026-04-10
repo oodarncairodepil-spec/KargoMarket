@@ -4,8 +4,10 @@ import { Card } from '../../components/Card'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 import { Spinner } from '../../components/ui/Spinner'
+import { useOnClickOutside } from '../../hooks/useOnClickOutside'
 import { ui } from '../../lib/uiTokens'
 import { supabase } from '../../lib/supabase'
+import { isDisplayableImageUrl, uploadUserFile } from '../../lib/storageUpload'
 import type { VehicleType, VendorRegistration } from '../../types/models'
 
 const inputClass = `mt-1 ${ui.form.input.compact}`
@@ -17,10 +19,20 @@ const dayOptions = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Mingg
 const cityOptions = ['Jakarta', 'Bandung', 'Surabaya', 'Semarang', 'Yogyakarta', 'Denpasar', 'Makassar', 'Medan', 'Balikpapan'] as const
 const pricingSchemes = ['Harga Nett', 'Fee (Komisi)'] as const
 const pricingMethods = ['Per kg', 'Per trip', 'Per Koli', 'Custom'] as const
+type VendorFilters = {
+  businessTypes: (typeof businessTypes)[number][]
+  originCities: string[]
+  destinationCities: string[]
+  serviceTypes: string[]
+  specializations: string[]
+  vehicleTypes: VehicleType[]
+  operationalDays: string[]
+  active: Array<'active' | 'inactive'>
+}
 
 /** Tanpa kolom base64 / JSON berat — muat daftar jauh lebih cepat. Detail penuh diambil saat edit. */
 const VENDOR_LIST_COLUMNS =
-  'id,name,business_type,established_year,origin_cities,destination_cities,pic_name,whatsapp_number,email,owner_name,owner_identity_proof_name,service_types,specializations,vehicle_types,max_capacity,operational_days,operational_hours,pricing_scheme,pricing_method,supports_bidding,legal_nib_name,npwp_name,office_photo_name,office_maps_link,office_latitude,office_longitude,sla_response,insurance_terms,packing_fee_terms,other_fees_terms,payment_terms,tax_terms,tnc_accepted,created_at'
+  'id,name,business_type,established_year,origin_cities,destination_cities,pic_name,whatsapp_number,email,owner_name,owner_identity_proof_name,service_types,specializations,vehicle_types,max_capacity,operational_days,operational_hours,pricing_scheme,pricing_method,supports_bidding,legal_nib_name,npwp_name,office_photo_name,office_maps_link,office_latitude,office_longitude,sla_response,insurance_terms,packing_fee_terms,other_fees_terms,payment_terms,tax_terms,tnc_accepted,is_active,created_at'
 
 const VENDOR_PAGE_SIZE = 10
 
@@ -31,6 +43,12 @@ function escapeForIlike(s: string): string {
 /** Koma memecah klausa `.or()` PostgREST — diganti spasi. */
 function sanitizeVendorSearchInput(s: string): string {
   return s.replace(/,/g, ' ').trim()
+}
+
+function formatThousandDots(rawDigits: string): string {
+  const d = rawDigits.replace(/\D/g, '')
+  if (!d) return ''
+  return d.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
 }
 
 function mapVendorRowToRegistration(row: Record<string, unknown>): VendorRegistration {
@@ -61,7 +79,12 @@ function mapVendorRowToRegistration(row: Record<string, unknown>): VendorRegistr
     legalNibDataUrl: (row.legal_nib_data_url as string) || undefined,
     npwpName: (row.npwp_name as string) || undefined,
     npwpDataUrl: (row.npwp_data_url as string) || undefined,
-    fleetPhotos: Array.isArray(fleetRaw) ? (fleetRaw as { name: string; dataUrl?: string }[]) : [],
+    fleetPhotos: Array.isArray(fleetRaw)
+      ? (fleetRaw as { name: string; dataUrl?: string; url?: string }[]).map((x) => ({
+          name: x.name,
+          dataUrl: x.dataUrl ?? x.url,
+        }))
+      : [],
     officePhotoName: (row.office_photo_name as string) || '',
     officePhotoDataUrl: (row.office_photo_data_url as string) || undefined,
     officeMapsLink: (row.office_maps_link as string) || '',
@@ -74,6 +97,7 @@ function mapVendorRowToRegistration(row: Record<string, unknown>): VendorRegistr
     paymentTerms: (row.payment_terms as string) || '',
     taxTerms: (row.tax_terms as string) || '',
     tncAccepted: Boolean(row.tnc_accepted),
+    isActive: row.is_active !== false,
     createdAt: (row.created_at as string) || new Date().toISOString(),
   }
 }
@@ -103,6 +127,8 @@ type InvalidField =
   | 'paymentTerms'
   | 'taxTerms'
   | 'tncAccepted'
+  | 'pricingScheme'
+  | 'pricingMethod'
 
 interface MapSuggestion {
   display_name: string
@@ -125,6 +151,12 @@ function CompactMultiSelect({
   hasError?: boolean
   onInteract?: () => void
 }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null)
+  useOnClickOutside(detailsRef, () => {
+    const d = detailsRef.current
+    if (d) d.open = false
+  })
+
   const [search, setSearch] = useState('')
   const summary = useMemo(() => {
     if (selected.length === 0) return placeholder
@@ -135,9 +167,10 @@ function CompactMultiSelect({
     () => options.filter((option) => option.toLowerCase().includes(search.toLowerCase().trim())),
     [options, search],
   )
+  const allSelected = filtered.length > 0 && filtered.every((option) => selected.includes(option))
 
   return (
-    <details className="group mt-1 relative" onToggle={onInteract}>
+    <details ref={detailsRef} className="group mt-1 relative" onToggle={onInteract}>
       <summary
         className={`flex min-h-11 cursor-pointer list-none items-center justify-between rounded-lg bg-white px-3 py-2 text-sm text-slate-800 ${
           hasError ? 'border-2 border-red-500 ring-2 ring-red-100' : 'border border-slate-200'
@@ -153,6 +186,24 @@ function CompactMultiSelect({
           placeholder="Cari opsi..."
           className="mb-2 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent"
         />
+        <div className="mb-2 flex items-center justify-between rounded-md bg-slate-50 px-2 py-1.5 text-xs text-slate-600">
+          <span>Centang untuk memilih</span>
+          <label className="flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => {
+                filtered.forEach((option) => {
+                  const has = selected.includes(option)
+                  if (allSelected ? has : !has) onToggle(option)
+                })
+                onInteract?.()
+              }}
+              className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent"
+            />
+            Pilih semua
+          </label>
+        </div>
         <div className="max-h-44 space-y-1 overflow-auto pr-1">
           {filtered.length === 0 && <p className="px-2 py-2 text-xs text-slate-500">Tidak ada hasil.</p>}
           {filtered.map((option) => (
@@ -173,6 +224,9 @@ function CompactMultiSelect({
             </label>
           ))}
         </div>
+        {filtered.length > 5 && (
+          <p className="mt-2 text-center text-[11px] text-slate-400">Gulir ke bawah untuk opsi lainnya</p>
+        )}
       </div>
     </details>
   )
@@ -186,6 +240,7 @@ export function AdminVendorManagementPage() {
   const npwpRef = useRef<HTMLInputElement>(null)
   const fleetRef = useRef<HTMLInputElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
+  const officeLocationContainerRef = useRef<HTMLDivElement>(null)
 
   const [view, setView] = useState<'list' | 'form'>('list')
   const [vendorRegistrations, setVendorRegistrations] = useState<VendorRegistration[]>([])
@@ -193,6 +248,17 @@ export function AdminVendorManagementPage() {
   const [listLoadingMore, setListLoadingMore] = useState(false)
   const [vendorSearchInput, setVendorSearchInput] = useState('')
   const [vendorSearchDebounced, setVendorSearchDebounced] = useState('')
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [vendorFilters, setVendorFilters] = useState<VendorFilters>({
+    businessTypes: [],
+    originCities: [],
+    destinationCities: [],
+    serviceTypes: [],
+    specializations: [],
+    vehicleTypes: [],
+    operationalDays: [],
+    active: [],
+  })
   const [vendorNextPage, setVendorNextPage] = useState(0)
   const [vendorHasMore, setVendorHasMore] = useState(true)
   const [vendorTotalCount, setVendorTotalCount] = useState<number | null>(null)
@@ -217,8 +283,8 @@ export function AdminVendorManagementPage() {
   const [operationalDays, setOperationalDays] = useState<string[]>([])
   const [operationalStartTime, setOperationalStartTime] = useState('')
   const [operationalEndTime, setOperationalEndTime] = useState('')
-  const [pricingScheme, setPricingScheme] = useState<(typeof pricingSchemes)[number]>('Harga Nett')
-  const [pricingMethod, setPricingMethod] = useState<(typeof pricingMethods)[number]>('Per trip')
+  const [pricingScheme, setPricingScheme] = useState<(typeof pricingSchemes)[number] | ''>('')
+  const [pricingMethod, setPricingMethod] = useState<(typeof pricingMethods)[number] | ''>('')
   const [supportsBidding, setSupportsBidding] = useState<boolean | null>(null)
   const [legalNibName, setLegalNibName] = useState('')
   const [legalNibDataUrl, setLegalNibDataUrl] = useState<string | undefined>(undefined)
@@ -241,8 +307,11 @@ export function AdminVendorManagementPage() {
   const [paymentTerms, setPaymentTerms] = useState('')
   const [taxTerms, setTaxTerms] = useState('')
   const [tncAccepted, setTncAccepted] = useState(false)
+  const [isActive, setIsActive] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [saveSubmitting, setSaveSubmitting] = useState(false)
+  const [vendorFileBusy, setVendorFileBusy] = useState(false)
 
   useEffect(() => {
     const mode = searchParams.get('mode')
@@ -270,22 +339,35 @@ export function AdminVendorManagementPage() {
     return () => clearTimeout(t)
   }, [vendorSearchInput])
 
-  const fetchVendorsPage = useCallback(async (pageIndex: number, searchQ: string) => {
-    const from = pageIndex * VENDOR_PAGE_SIZE
-    const to = from + VENDOR_PAGE_SIZE - 1
-    let qb = supabase
-      .from('vendors')
-      .select(VENDOR_LIST_COLUMNS, { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(from, to)
-    const raw = sanitizeVendorSearchInput(searchQ)
-    if (raw.length > 0) {
-      const esc = escapeForIlike(raw)
-      const p = `%${esc}%`
-      qb = qb.or(`name.ilike.${p},email.ilike.${p},whatsapp_number.ilike.${p},pic_name.ilike.${p}`)
-    }
-    return qb
-  }, [])
+  const fetchVendorsPage = useCallback(
+    async (pageIndex: number, searchQ: string, filters: VendorFilters) => {
+      const from = pageIndex * VENDOR_PAGE_SIZE
+      const to = from + VENDOR_PAGE_SIZE - 1
+      let qb = supabase
+        .from('vendors')
+        .select(VENDOR_LIST_COLUMNS, { count: 'exact' })
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(from, to)
+      const raw = sanitizeVendorSearchInput(searchQ)
+      if (raw.length > 0) {
+        const esc = escapeForIlike(raw)
+        const p = `%${esc}%`
+        qb = qb.or(`name.ilike.${p},email.ilike.${p},whatsapp_number.ilike.${p},pic_name.ilike.${p}`)
+      }
+      if (filters.businessTypes.length > 0) qb = qb.in('business_type', filters.businessTypes)
+      if (filters.originCities.length > 0) qb = qb.overlaps('origin_cities', filters.originCities)
+      if (filters.destinationCities.length > 0) qb = qb.overlaps('destination_cities', filters.destinationCities)
+      if (filters.serviceTypes.length > 0) qb = qb.overlaps('service_types', filters.serviceTypes)
+      if (filters.specializations.length > 0) qb = qb.overlaps('specializations', filters.specializations)
+      if (filters.vehicleTypes.length > 0) qb = qb.overlaps('vehicle_types', filters.vehicleTypes)
+      if (filters.operationalDays.length > 0) qb = qb.overlaps('operational_days', filters.operationalDays)
+      if (filters.active.includes('active') && !filters.active.includes('inactive')) qb = qb.eq('is_active', true)
+      if (filters.active.includes('inactive') && !filters.active.includes('active')) qb = qb.eq('is_active', false)
+      return qb
+    },
+    [],
+  )
 
   const reloadVendorList = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -294,7 +376,7 @@ export function AdminVendorManagementPage() {
       setVendorHasMore(true)
       setVendorNextPage(0)
       try {
-        const { data, error: loadError, count } = await fetchVendorsPage(0, vendorSearchDebounced)
+        const { data, error: loadError, count } = await fetchVendorsPage(0, vendorSearchDebounced, vendorFilters)
         if (loadError) {
           setError(loadError.message)
           setVendorRegistrations([])
@@ -311,7 +393,7 @@ export function AdminVendorManagementPage() {
         if (!opts?.silent) setListLoading(false)
       }
     },
-    [fetchVendorsPage, vendorSearchDebounced],
+    [fetchVendorsPage, vendorSearchDebounced, vendorFilters],
   )
 
   useEffect(() => {
@@ -323,7 +405,11 @@ export function AdminVendorManagementPage() {
     setListLoadingMore(true)
     setError('')
     try {
-      const { data, error: loadError } = await fetchVendorsPage(vendorNextPage, vendorSearchDebounced)
+      const { data, error: loadError } = await fetchVendorsPage(
+        vendorNextPage,
+        vendorSearchDebounced,
+        vendorFilters,
+      )
       if (loadError) {
         setError(loadError.message)
         return
@@ -340,7 +426,15 @@ export function AdminVendorManagementPage() {
     } finally {
       setListLoadingMore(false)
     }
-  }, [fetchVendorsPage, vendorNextPage, vendorSearchDebounced, vendorHasMore, listLoadingMore, listLoading])
+  }, [
+    fetchVendorsPage,
+    vendorNextPage,
+    vendorSearchDebounced,
+    vendorFilters,
+    vendorHasMore,
+    listLoadingMore,
+    listLoading,
+  ])
 
   useEffect(() => {
     if (view !== 'list') return
@@ -355,6 +449,15 @@ export function AdminVendorManagementPage() {
     ob.observe(el)
     return () => ob.disconnect()
   }, [view, loadMoreVendors, vendorRegistrations.length, vendorHasMore])
+
+  useOnClickOutside(
+    officeLocationContainerRef,
+    () => {
+      setLocationSuggestions([])
+      setLocationLoading(false)
+    },
+    locationLoading || locationSuggestions.length > 0,
+  )
 
   function fieldClass(key: InvalidField): string {
     return invalidField === key
@@ -399,20 +502,22 @@ export function AdminVendorManagementPage() {
       paymentTerms: '[data-field="paymentTerms"]',
       taxTerms: '[data-field="taxTerms"]',
       tncAccepted: '[data-field="tncAccepted"]',
+      pricingScheme: '[data-field="pricingScheme"]',
+      pricingMethod: '[data-field="pricingMethod"]',
     }
     const node = formRef.current.querySelector<HTMLElement>(selectorMap[field])
     node?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     node?.focus?.()
   }
 
-  async function fileToDataUrl(file: File): Promise<string | undefined> {
-    if (!file) return undefined
-    return new Promise((resolve) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : undefined)
-      reader.onerror = () => resolve(undefined)
-      reader.readAsDataURL(file)
-    })
+  async function uploadVendorAsset(file: File, segment: string): Promise<string | undefined> {
+    setError('')
+    const res = await uploadUserFile(`vendors/${segment}`, file)
+    if ('error' in res) {
+      setError(res.error)
+      return undefined
+    }
+    return res.url
   }
 
   function toggle(setter: React.Dispatch<React.SetStateAction<string[]>>, item: string) {
@@ -459,6 +564,8 @@ export function AdminVendorManagementPage() {
     if (serviceTypes.length === 0) return { field: 'serviceTypes', message: 'Jenis layanan minimal 1.' }
     if (specializations.length === 0) return { field: 'specializations', message: 'Spesialisasi minimal 1.' }
     if (vehicleTypes.length === 0) return { field: 'vehicleTypes', message: 'Jenis kendaraan minimal 1.' }
+    if (!pricingScheme) return { field: 'pricingScheme', message: 'Skema harga wajib dipilih.' }
+    if (!pricingMethod) return { field: 'pricingMethod', message: 'Metode penentuan harga wajib dipilih.' }
     if (operationalDays.length === 0) return { field: 'operationalDays', message: 'Hari operasional minimal 1.' }
     if (!operationalStartTime) return { field: 'operationalStartTime', message: 'Jam mulai operasional wajib diisi.' }
     if (!operationalEndTime) return { field: 'operationalEndTime', message: 'Jam selesai operasional wajib diisi.' }
@@ -494,8 +601,8 @@ export function AdminVendorManagementPage() {
     setOperationalDays([])
     setOperationalStartTime('')
     setOperationalEndTime('')
-    setPricingScheme('Harga Nett')
-    setPricingMethod('Per trip')
+    setPricingScheme('')
+    setPricingMethod('')
     setSupportsBidding(null)
     setLegalNibName('')
     setLegalNibDataUrl(undefined)
@@ -516,6 +623,7 @@ export function AdminVendorManagementPage() {
     setPaymentTerms('')
     setTaxTerms('')
     setTncAccepted(false)
+    setIsActive(true)
     setInvalidField(null)
     setEditingVendorId(null)
   }
@@ -536,13 +644,21 @@ export function AdminVendorManagementPage() {
     setServiceTypes(v.serviceTypes || [])
     setSpecializations(v.specializations || [])
     setVehicleTypes(v.vehicleTypes || [])
-    setMaxCapacity(v.maxCapacity || '')
+    setMaxCapacity((v.maxCapacity || '').replace(/\D/g, ''))
     setOperationalDays(v.operationalDays || [])
     const [start, end] = (v.operationalHours || '').split(' - ')
     setOperationalStartTime(start || '')
     setOperationalEndTime(end || '')
-    setPricingScheme(v.pricingScheme || 'Harga Nett')
-    setPricingMethod(v.pricingMethod || 'Per trip')
+    setPricingScheme(
+      v.pricingScheme && pricingSchemes.includes(v.pricingScheme as (typeof pricingSchemes)[number])
+        ? v.pricingScheme
+        : '',
+    )
+    setPricingMethod(
+      v.pricingMethod && pricingMethods.includes(v.pricingMethod as (typeof pricingMethods)[number])
+        ? v.pricingMethod
+        : '',
+    )
     setSupportsBidding(typeof v.supportsBidding === 'boolean' ? v.supportsBidding : null)
     setLegalNibName(v.legalNibName || '')
     setLegalNibDataUrl(v.legalNibDataUrl)
@@ -562,6 +678,7 @@ export function AdminVendorManagementPage() {
     setPaymentTerms(v.paymentTerms || '')
     setTaxTerms(v.taxTerms || '')
     setTncAccepted(Boolean(v.tncAccepted))
+    setIsActive(v.isActive !== false)
     setError('')
     setSuccess('')
     setInvalidField(null)
@@ -613,6 +730,8 @@ export function AdminVendorManagementPage() {
       focusInvalidField('whatsappNumber')
       return
     }
+    setSaveSubmitting(true)
+    try {
     const payload = {
       id: editingVendorId || `v_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`,
       name: companyName.trim(),
@@ -629,11 +748,11 @@ export function AdminVendorManagementPage() {
       service_types: serviceTypes,
       specializations,
       vehicle_types: vehicleTypes,
-      max_capacity: maxCapacity.trim() || null,
+      max_capacity: maxCapacity.replace(/\D/g, '') || null,
       operational_days: operationalDays,
       operational_hours: `${operationalStartTime} - ${operationalEndTime}`,
-      pricing_scheme: pricingScheme,
-      pricing_method: pricingMethod,
+      pricing_scheme: pricingScheme as (typeof pricingSchemes)[number],
+      pricing_method: pricingMethod as (typeof pricingMethods)[number],
       supports_bidding: Boolean(supportsBidding),
       legal_nib_name: legalNibName || null,
       legal_nib_data_url: legalNibDataUrl || null,
@@ -652,30 +771,34 @@ export function AdminVendorManagementPage() {
       payment_terms: paymentTerms.trim(),
       tax_terms: taxTerms.trim(),
       tnc_accepted: tncAccepted,
+      is_active: isActive,
     }
-    const { error: upsertError } = await supabase.from('vendors').upsert(payload)
-    if (upsertError) {
-      const raw = upsertError.message || ''
-      const code = 'code' in upsertError ? String((upsertError as { code?: string }).code) : ''
-      if (code === '23505' || /duplicate key|unique constraint/i.test(raw)) {
-        setError(
-          'Email atau nomor WhatsApp sudah dipakai vendor lain (validasi database). Sesuaikan kontak atau edit vendor yang ada.',
-        )
+      const { error: upsertError } = await supabase.from('vendors').upsert(payload)
+      if (upsertError) {
+        const raw = upsertError.message || ''
+        const code = 'code' in upsertError ? String((upsertError as { code?: string }).code) : ''
+        if (code === '23505' || /duplicate key|unique constraint/i.test(raw)) {
+          setError(
+            'Email atau nomor WhatsApp sudah dipakai vendor lain (validasi database). Sesuaikan kontak atau edit vendor yang ada.',
+          )
+          return
+        }
+        if (/401|unauthorized|invalid api key/i.test(raw)) {
+          setError(
+            'Supabase menolak request (401). Jalankan migration policy anon terbaru, lalu restart `npm run dev` agar env VITE terbaca ulang.',
+          )
+        } else {
+          setError(raw)
+        }
         return
       }
-      if (/401|unauthorized|invalid api key/i.test(raw)) {
-        setError(
-          'Supabase menolak request (401). Jalankan migration policy anon terbaru, lalu restart `npm run dev` agar env VITE terbaca ulang.',
-        )
-      } else {
-        setError(raw)
-      }
-      return
+      setSuccess(`Data vendor "${payload.name}" disimpan.`)
+      await reloadVendorList({ silent: true })
+      resetForm()
+      setViewMode('list')
+    } finally {
+      setSaveSubmitting(false)
     }
-    setSuccess(`Data vendor "${payload.name}" disimpan.`)
-    await reloadVendorList({ silent: true })
-    resetForm()
-    setViewMode('list')
   }
 
   useEffect(() => {
@@ -703,18 +826,45 @@ export function AdminVendorManagementPage() {
 
   if (view === 'list') {
     const searchActive = vendorSearchDebounced.trim().length > 0
+    const activeFilterCount = Object.values(vendorFilters).reduce(
+      (n, v) => n + (Array.isArray(v) ? (v.length > 0 ? 1 : 0) : 0),
+      0,
+    )
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1">
             <label className="block text-xs font-medium text-slate-600">Cari vendor</label>
-            <Input
-              className="mt-1"
-              value={vendorSearchInput}
-              onChange={(e) => setVendorSearchInput(e.target.value)}
-              placeholder="Nama, email, WhatsApp, atau PIC…"
-              autoComplete="off"
-            />
+            <div className="mt-1 flex items-center gap-2">
+              <Input
+                className="flex-1"
+                value={vendorSearchInput}
+                onChange={(e) => setVendorSearchInput(e.target.value)}
+                placeholder="Nama, email, WhatsApp, atau PIC…"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={() => setFilterModalOpen(true)}
+                className="relative inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm hover:text-accent"
+                aria-label="Buka filter vendor"
+              >
+                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden>
+                  <path
+                    d="M3 6h18M7 12h10M10 18h4"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                {activeFilterCount > 0 && (
+                  <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-white">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+            </div>
             {!listLoading && (
               <p className="mt-2 text-sm font-medium text-slate-700">
                 {vendorTotalCount != null
@@ -724,10 +874,82 @@ export function AdminVendorManagementPage() {
               </p>
             )}
           </div>
-          <Button type="button" size="sm" disabled={detailLoading} onClick={() => setViewMode('form')}>
+          <Button
+            type="button"
+            size="sm"
+            disabled={detailLoading}
+            onClick={() => {
+              resetForm()
+              setViewMode('form')
+            }}
+          >
             Tambah
           </Button>
         </div>
+        {filterModalOpen && (
+          <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/30 px-4 pb-4 sm:items-center">
+            <div className="w-full max-w-lg rounded-2xl bg-white p-4 shadow-xl">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">Filter vendor</p>
+                <button
+                  type="button"
+                  onClick={() => setFilterModalOpen(false)}
+                  className="rounded-md p-2 text-slate-500 hover:bg-slate-100"
+                  aria-label="Tutup filter"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Jenis usaha</p>
+                  <CompactMultiSelect
+                    options={businessTypes}
+                    selected={vendorFilters.businessTypes}
+                    onToggle={(v) => setVendorFilters((p) => ({ ...p, businessTypes: p.businessTypes.includes(v as (typeof businessTypes)[number]) ? p.businessTypes.filter((x) => x !== v) : [...p.businessTypes, v as (typeof businessTypes)[number]] }))}
+                    placeholder="Semua"
+                  />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Kota asal</p>
+                  <CompactMultiSelect options={cityOptions} selected={vendorFilters.originCities} onToggle={(v) => setVendorFilters((p) => ({ ...p, originCities: p.originCities.includes(v) ? p.originCities.filter((x) => x !== v) : [...p.originCities, v] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Kota tujuan</p>
+                  <CompactMultiSelect options={cityOptions} selected={vendorFilters.destinationCities} onToggle={(v) => setVendorFilters((p) => ({ ...p, destinationCities: p.destinationCities.includes(v) ? p.destinationCities.filter((x) => x !== v) : [...p.destinationCities, v] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Jenis layanan</p>
+                  <CompactMultiSelect options={serviceTypeOptions} selected={vendorFilters.serviceTypes} onToggle={(v) => setVendorFilters((p) => ({ ...p, serviceTypes: p.serviceTypes.includes(v) ? p.serviceTypes.filter((x) => x !== v) : [...p.serviceTypes, v] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Spesialisasi</p>
+                  <CompactMultiSelect options={specializationOptions} selected={vendorFilters.specializations} onToggle={(v) => setVendorFilters((p) => ({ ...p, specializations: p.specializations.includes(v) ? p.specializations.filter((x) => x !== v) : [...p.specializations, v] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Jenis kendaraan</p>
+                  <CompactMultiSelect options={vehicleOptions} selected={vendorFilters.vehicleTypes} onToggle={(v) => setVendorFilters((p) => ({ ...p, vehicleTypes: p.vehicleTypes.includes(v as VehicleType) ? p.vehicleTypes.filter((x) => x !== v) : [...p.vehicleTypes, v as VehicleType] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Hari operasional</p>
+                  <CompactMultiSelect options={dayOptions} selected={vendorFilters.operationalDays} onToggle={(v) => setVendorFilters((p) => ({ ...p, operationalDays: p.operationalDays.includes(v) ? p.operationalDays.filter((x) => x !== v) : [...p.operationalDays, v] }))} placeholder="Semua" />
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Status vendor</p>
+                  <CompactMultiSelect options={['active', 'inactive']} selected={vendorFilters.active} onToggle={(v) => setVendorFilters((p) => ({ ...p, active: p.active.includes(v as 'active' | 'inactive') ? p.active.filter((x) => x !== v) : [...p.active, v as 'active' | 'inactive'] }))} placeholder="Semua" />
+                </div>
+              </div>
+              <div className="mt-4 flex gap-2">
+                <Button type="button" variant="secondary" size="sm" className="flex-1" onClick={() => setVendorFilters({ businessTypes: [], originCities: [], destinationCities: [], serviceTypes: [], specializations: [], vehicleTypes: [], operationalDays: [], active: [] })}>
+                  Reset
+                </Button>
+                <Button type="button" size="sm" className="flex-1" onClick={() => setFilterModalOpen(false)}>
+                  Terapkan
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
         {detailLoading && (
           <Card className="flex items-center gap-3 py-4">
             <Spinner className="h-6 w-6 shrink-0" />
@@ -849,10 +1071,46 @@ export function AdminVendorManagementPage() {
           </label>
           <div className="mt-3">
             <p className="text-sm font-medium text-slate-700">Bukti Identitas Owner (opsional)</p>
-            <input ref={ownerProofRef} type="file" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; setOwnerIdentityProofName(f.name); setOwnerIdentityProofDataUrl(await fileToDataUrl(f)) }} />
-            <Button type="button" onClick={() => ownerProofRef.current?.click()} variant="secondary" size="sm" className={uploadButtonClass()}>
-              {ownerIdentityProofName || 'Upload KTP / identitas lain'}
-            </Button>
+            <input
+              ref={ownerProofRef}
+              type="file"
+              accept="image/*"
+              disabled={vendorFileBusy}
+              className="sr-only"
+              onChange={(e) => {
+                void (async () => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  setVendorFileBusy(true)
+                  const url = await uploadVendorAsset(f, 'owner-id')
+                  setVendorFileBusy(false)
+                  if (url) {
+                    setOwnerIdentityProofName(f.name)
+                    setOwnerIdentityProofDataUrl(url)
+                  }
+                  e.target.value = ''
+                })()
+              }}
+            />
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+              {ownerIdentityProofDataUrl && isDisplayableImageUrl(ownerIdentityProofDataUrl) && (
+                <img
+                  src={ownerIdentityProofDataUrl}
+                  alt="Pratinjau identitas owner"
+                  className="h-16 w-16 shrink-0 rounded-lg border border-slate-200 object-cover"
+                />
+              )}
+              <Button
+                type="button"
+                disabled={vendorFileBusy}
+                onClick={() => ownerProofRef.current?.click()}
+                variant="secondary"
+                size="sm"
+                className={`${uploadButtonClass()} flex-1`}
+              >
+                {ownerIdentityProofName || 'Upload KTP / identitas lain'}
+              </Button>
+            </div>
           </div>
         </Card>
 
@@ -871,8 +1129,15 @@ export function AdminVendorManagementPage() {
             <CompactMultiSelect options={vehicleOptions} selected={vehicleTypes} onToggle={(o) => { setVehicleTypes((prev) => prev.includes(o as VehicleType) ? prev.filter((x) => x !== o) : [...prev, o as VehicleType]); clearInvalid('vehicleTypes') }} placeholder="Pilih kendaraan" hasError={invalidField === 'vehicleTypes'} onInteract={() => clearInvalid('vehicleTypes')} />
           </div>
           <label className="mt-3 block text-sm font-medium text-slate-700">
-            Kapasitas Maksimal (opsional)
-            <input className={inputClass} value={maxCapacity} onChange={(e) => setMaxCapacity(e.target.value)} placeholder="Contoh: 10 ton" />
+            Kapasitas maksimal (opsional)
+            <input
+              className={inputClass}
+              inputMode="numeric"
+              value={formatThousandDots(maxCapacity)}
+              onChange={(e) => setMaxCapacity(e.target.value.replace(/\D/g, ''))}
+              placeholder="Contoh: 5000"
+            />
+            <span className="mt-1 block text-xs text-slate-500">Angka di atas berarti berat muatan maksimal dalam kilogram (kg).</span>
           </label>
         </Card>
 
@@ -893,8 +1158,44 @@ export function AdminVendorManagementPage() {
 
         <Card className="text-left">
           <p className="text-sm font-semibold text-slate-900">Harga & Skema</p>
-          <label className="mt-3 block text-sm font-medium text-slate-700">Skema Harga<select className={inputClass} value={pricingScheme} onChange={(e) => setPricingScheme(e.target.value as (typeof pricingSchemes)[number])}>{pricingSchemes.map((s) => <option key={s} value={s}>{s}</option>)}</select></label>
-          <label className="mt-3 block text-sm font-medium text-slate-700">Metode Penentuan Harga<select className={inputClass} value={pricingMethod} onChange={(e) => setPricingMethod(e.target.value as (typeof pricingMethods)[number])}>{pricingMethods.map((s) => <option key={s} value={s}>{s}</option>)}</select></label>
+          <label className="mt-3 block text-sm font-medium text-slate-700">
+            Skema harga
+            <select
+              data-field="pricingScheme"
+              className={fieldClass('pricingScheme')}
+              value={pricingScheme}
+              onChange={(e) => {
+                setPricingScheme(e.target.value as (typeof pricingSchemes)[number] | '')
+                clearInvalid('pricingScheme')
+              }}
+            >
+              <option value="">Pilih skema harga</option>
+              {pricingSchemes.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="mt-3 block text-sm font-medium text-slate-700">
+            Metode penentuan harga
+            <select
+              data-field="pricingMethod"
+              className={fieldClass('pricingMethod')}
+              value={pricingMethod}
+              onChange={(e) => {
+                setPricingMethod(e.target.value as (typeof pricingMethods)[number] | '')
+                clearInvalid('pricingMethod')
+              }}
+            >
+              <option value="">Pilih metode</option>
+              {pricingMethods.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className={`mt-3 rounded-lg p-1 ${invalidField === 'supportsBidding' ? 'border border-red-500 bg-red-50/30' : ''}`} data-field="supportsBidding" tabIndex={-1}>
             <p className="text-sm font-medium text-slate-700">Bersedia Sistem Bidding</p>
             <div className="mt-1 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-1">
@@ -920,47 +1221,196 @@ export function AdminVendorManagementPage() {
 
         <Card className="text-left">
           <p className="text-sm font-semibold text-slate-900">Dokumen & Verifikasi</p>
-          <div className="mt-3"><p className="text-sm font-medium text-slate-700">NIB / Legalitas (opsional)</p><input ref={nibRef} type="file" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; setLegalNibName(f.name); setLegalNibDataUrl(await fileToDataUrl(f)) }} /><Button type="button" onClick={() => nibRef.current?.click()} variant="secondary" size="sm" className={uploadButtonClass()}>{legalNibName || 'Upload file legalitas'}</Button></div>
-          <div className="mt-3"><p className="text-sm font-medium text-slate-700">NPWP (opsional)</p><input ref={npwpRef} type="file" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; setNpwpName(f.name); setNpwpDataUrl(await fileToDataUrl(f)) }} /><Button type="button" onClick={() => npwpRef.current?.click()} variant="secondary" size="sm" className={uploadButtonClass()}>{npwpName || 'Upload file NPWP'}</Button></div>
-          <div className="mt-3"><p className="text-sm font-medium text-slate-700">Foto Armada (opsional, multi)</p><input ref={fleetRef} type="file" multiple className="sr-only" onChange={async (e) => { const files = Array.from(e.target.files || []); if (files.length === 0) return; const mapped = await Promise.all(files.map(async (f) => ({ name: f.name, dataUrl: await fileToDataUrl(f) }))); setFleetPhotos(mapped) }} /><Button type="button" onClick={() => fleetRef.current?.click()} variant="secondary" size="sm" className={uploadButtonClass()}>{fleetPhotos.length > 0 ? `${fleetPhotos.length} file dipilih` : 'Upload foto armada'}</Button></div>
-          <div className="mt-3" data-field="officePhoto" tabIndex={-1}><p className="text-sm font-medium text-slate-700">Foto Kantor (wajib)</p><input ref={officePhotoRef} type="file" accept="image/*" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; if (!f.type.startsWith('image/')) { setError('Foto kantor hanya menerima file gambar (jpg/png/webp).'); setInvalidField('officePhoto'); return } setOfficePhotoName(f.name); setOfficePhotoDataUrl(await fileToDataUrl(f)); clearInvalid('officePhoto') }} /><Button type="button" onClick={() => officePhotoRef.current?.click()} variant="secondary" size="sm" className={uploadButtonClass(invalidField === 'officePhoto')}>{officePhotoName || 'Upload foto kantor'}</Button></div>
-          <label className="mt-3 block text-sm font-medium text-slate-700">Lokasi Kantor (Maps)
-            <div className="relative mt-1">
-              <input data-field="officeMapsLink" className={fieldClass('officeMapsLink')} value={officeLocationSearch} onChange={(e) => { const val = e.target.value; setOfficeLocationSearch(val); setOfficeMapsLink(val); clearInvalid('officeMapsLink') }} placeholder="Cari alamat/lokasi kantor..." />
-              <button type="button" onClick={pickCurrentLocation} disabled={locating} aria-label="Deteksi lokasi saat ini" className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-accent disabled:opacity-50">
-                <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none">
-                  <path d="M12 2a7 7 0 0 0-7 7c0 5.3 7 13 7 13s7-7.7 7-13a7 7 0 0 0-7-7Z" stroke="currentColor" strokeWidth="2" />
-                  <circle cx="12" cy="9" r="2.5" stroke="currentColor" strokeWidth="2" />
-                </svg>
-              </button>
-            </div>
-            {(locationLoading || locationSuggestions.length > 0) && (
-              <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                {locationLoading && <p className="px-3 py-2 text-xs text-slate-500">Mencari lokasi...</p>}
-                {!locationLoading && locationSuggestions.length > 0 && (
-                  <ul className="max-h-44 overflow-auto">
-                    {locationSuggestions.map((s, idx) => (
-                      <li key={`${s.lat}-${s.lon}-${idx}`}>
-                        <button
-                          type="button"
-                          className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
-                          onClick={() => {
-                            setOfficeLocationSearch(s.display_name)
-                            setOfficeLatitude(Number(s.lat).toFixed(6))
-                            setOfficeLongitude(Number(s.lon).toFixed(6))
-                            setOfficeMapsLink(`https://maps.google.com/?q=${s.lat},${s.lon}`)
-                            setLocationSuggestions([])
-                            clearInvalid('officeMapsLink')
-                          }}
-                        >
-                          {s.display_name}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+          <div className="mt-3">
+            <p className="text-sm font-medium text-slate-700">NIB / Legalitas (opsional)</p>
+            <input
+              ref={nibRef}
+              type="file"
+              accept="image/*,.pdf,application/pdf"
+              disabled={vendorFileBusy}
+              className="sr-only"
+              onChange={(e) => {
+                void (async () => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  setVendorFileBusy(true)
+                  const url = await uploadVendorAsset(f, 'legal-nib')
+                  setVendorFileBusy(false)
+                  if (url) {
+                    setLegalNibName(f.name)
+                    setLegalNibDataUrl(url)
+                  }
+                  e.target.value = ''
+                })()
+              }}
+            />
+            <Button
+              type="button"
+              disabled={vendorFileBusy}
+              onClick={() => nibRef.current?.click()}
+              variant="secondary"
+              size="sm"
+              className={uploadButtonClass()}
+            >
+              {legalNibName || 'Upload file legalitas'}
+            </Button>
+          </div>
+          <div className="mt-3">
+            <p className="text-sm font-medium text-slate-700">NPWP (opsional)</p>
+            <input
+              ref={npwpRef}
+              type="file"
+              accept="image/*,.pdf,application/pdf"
+              disabled={vendorFileBusy}
+              className="sr-only"
+              onChange={(e) => {
+                void (async () => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  setVendorFileBusy(true)
+                  const url = await uploadVendorAsset(f, 'npwp')
+                  setVendorFileBusy(false)
+                  if (url) {
+                    setNpwpName(f.name)
+                    setNpwpDataUrl(url)
+                  }
+                  e.target.value = ''
+                })()
+              }}
+            />
+            <Button
+              type="button"
+              disabled={vendorFileBusy}
+              onClick={() => npwpRef.current?.click()}
+              variant="secondary"
+              size="sm"
+              className={uploadButtonClass()}
+            >
+              {npwpName || 'Upload file NPWP'}
+            </Button>
+          </div>
+          <div className="mt-3">
+            <p className="text-sm font-medium text-slate-700">Foto Armada (opsional, multi)</p>
+            <input
+              ref={fleetRef}
+              type="file"
+              multiple
+              accept="image/*"
+              disabled={vendorFileBusy}
+              className="sr-only"
+              onChange={(e) => {
+                void (async () => {
+                  const files = Array.from(e.target.files || [])
+                  if (files.length === 0) return
+                  setVendorFileBusy(true)
+                  const added: { name: string; dataUrl?: string }[] = []
+                  for (const f of files) {
+                    if (!f.type.startsWith('image/')) {
+                      setError('Foto armada hanya gambar (jpg/png/webp).')
+                      break
+                    }
+                    const url = await uploadVendorAsset(f, 'fleet')
+                    if (!url) break
+                    added.push({ name: f.name, dataUrl: url })
+                  }
+                  setVendorFileBusy(false)
+                  if (added.length) setFleetPhotos((prev) => [...prev, ...added])
+                  e.target.value = ''
+                })()
+              }}
+            />
+            <Button
+              type="button"
+              disabled={vendorFileBusy}
+              onClick={() => fleetRef.current?.click()}
+              variant="secondary"
+              size="sm"
+              className={uploadButtonClass()}
+            >
+              {fleetPhotos.length > 0 ? `${fleetPhotos.length} file dipilih` : 'Upload foto armada'}
+            </Button>
+          </div>
+          <div className="mt-3" data-field="officePhoto" tabIndex={-1}>
+            <p className="text-sm font-medium text-slate-700">Foto Kantor (wajib)</p>
+            <input
+              ref={officePhotoRef}
+              type="file"
+              accept="image/*"
+              disabled={vendorFileBusy}
+              className="sr-only"
+              onChange={(e) => {
+                void (async () => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  if (!f.type.startsWith('image/')) {
+                    setError('Foto kantor hanya menerima file gambar (jpg/png/webp).')
+                    setInvalidField('officePhoto')
+                    e.target.value = ''
+                    return
+                  }
+                  setVendorFileBusy(true)
+                  const url = await uploadVendorAsset(f, 'office')
+                  setVendorFileBusy(false)
+                  if (url) {
+                    setOfficePhotoName(f.name)
+                    setOfficePhotoDataUrl(url)
+                    clearInvalid('officePhoto')
+                  }
+                  e.target.value = ''
+                })()
+              }}
+            />
+            <Button
+              type="button"
+              disabled={vendorFileBusy}
+              onClick={() => officePhotoRef.current?.click()}
+              variant="secondary"
+              size="sm"
+              className={uploadButtonClass(invalidField === 'officePhoto')}
+            >
+              {officePhotoName || 'Upload foto kantor'}
+            </Button>
+          </div>
+          <label className="mt-3 block text-sm font-medium text-slate-700">
+            Lokasi Kantor (Maps)
+            <div ref={officeLocationContainerRef} className="mt-1">
+              <div className="relative">
+                <input data-field="officeMapsLink" className={fieldClass('officeMapsLink')} value={officeLocationSearch} onChange={(e) => { const val = e.target.value; setOfficeLocationSearch(val); setOfficeMapsLink(val); clearInvalid('officeMapsLink') }} placeholder="Cari alamat/lokasi kantor..." />
+                <button type="button" onClick={pickCurrentLocation} disabled={locating} aria-label="Deteksi lokasi saat ini" className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-accent disabled:opacity-50">
+                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none">
+                    <path d="M12 2a7 7 0 0 0-7 7c0 5.3 7 13 7 13s7-7.7 7-13a7 7 0 0 0-7-7Z" stroke="currentColor" strokeWidth="2" />
+                    <circle cx="12" cy="9" r="2.5" stroke="currentColor" strokeWidth="2" />
+                  </svg>
+                </button>
               </div>
-            )}
+              {(locationLoading || locationSuggestions.length > 0) && (
+                <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                  {locationLoading && <p className="px-3 py-2 text-xs text-slate-500">Mencari lokasi...</p>}
+                  {!locationLoading && locationSuggestions.length > 0 && (
+                    <ul className="max-h-44 overflow-auto">
+                      {locationSuggestions.map((s, idx) => (
+                        <li key={`${s.lat}-${s.lon}-${idx}`}>
+                          <button
+                            type="button"
+                            className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+                            onClick={() => {
+                              setOfficeLocationSearch(s.display_name)
+                              setOfficeLatitude(Number(s.lat).toFixed(6))
+                              setOfficeLongitude(Number(s.lon).toFixed(6))
+                              setOfficeMapsLink(`https://maps.google.com/?q=${s.lat},${s.lon}`)
+                              setLocationSuggestions([])
+                              clearInvalid('officeMapsLink')
+                            }}
+                          >
+                            {s.display_name}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
           </label>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <label className="text-xs font-medium text-slate-600">Latitude<input className={inputClass} value={officeLatitude} onChange={(e) => setOfficeLatitude(e.target.value)} placeholder="-6.200000" /></label>
@@ -987,10 +1437,44 @@ export function AdminVendorManagementPage() {
           </label>
         </Card>
 
-        <Button type="submit" variant="neutralDark" size="lg" fullWidth>
-          {editingVendorId ? 'Simpan Perubahan' : 'Simpan Vendor'}
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[var(--shadow-card)] text-left">
+          <p className="text-sm font-semibold text-slate-900">Status Vendor</p>
+          <div className="mt-2 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-1">
+            <span className={`px-2 text-sm font-medium ${isActive ? 'text-emerald-700' : 'text-slate-500'}`}>
+              {isActive ? 'Aktif' : 'Nonaktif'}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isActive}
+              onClick={() => setIsActive((v) => !v)}
+              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${isActive ? 'bg-emerald-500' : 'bg-slate-300'}`}
+            >
+              <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${isActive ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+        </div>
+        <Button type="submit" variant="neutralDark" size="lg" fullWidth disabled={saveSubmitting || vendorFileBusy}>
+          {saveSubmitting ? (
+            <span className="inline-flex items-center justify-center gap-2">
+              <Spinner className="h-5 w-5" />
+              Menyimpan…
+            </span>
+          ) : editingVendorId ? (
+            'Simpan Perubahan'
+          ) : (
+            'Simpan Vendor'
+          )}
         </Button>
       </form>
+
+      {saveSubmitting && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 bg-white/85 backdrop-blur-[2px] px-6">
+          <Spinner className="h-10 w-10 text-slate-700" />
+          <p className="text-center text-sm font-medium text-slate-800">Menyimpan vendor…</p>
+          <p className="text-center text-xs text-slate-500">Mohon tunggu, Anda akan diarahkan ke daftar vendor.</p>
+        </div>
+      )}
     </div>
   )
 }

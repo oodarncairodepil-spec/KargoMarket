@@ -59,6 +59,22 @@ const confirmPaymentSchema = z.object({
   proofFileName: z.string().min(1),
   proofDataUrl: z.string().nullable().optional(),
 })
+const adminConfirmPaymentSchema = z.object({
+  confirmationImageUrl: z.string().url(),
+})
+const adminUpdateStatusSchema = z.object({
+  status: z.enum([
+    'awaiting_quotes',
+    'quotes_ready',
+    'vendor_selected',
+    'awaiting_payment',
+    'paid',
+    'payment_confirmed',
+    'in_transit',
+    'cancelled',
+    'completed',
+  ]),
+})
 
 const inquirySchema = z.object({
   pickup: z.string(),
@@ -100,16 +116,27 @@ function toIso(v) {
 
 /** Ringkas untuk daftar admin — tanpa alamat panjang, gambar base64, dll. */
 function mapAdminInquiryListRow(r) {
+  const createdAt = toIso(r.created_at) ?? r.created_at
+  const ymd = createdAt.slice(0, 10).replace(/-/g, '')
+  const ddmmyy = ymd.length === 8 ? `${ymd.slice(6, 8)}${ymd.slice(4, 6)}${ymd.slice(2, 4)}` : '000000'
+  const compactId = String(r.id || '')
+    .replace(/^inq_/i, '')
+    .replace(/[^a-z0-9]/gi, '')
+    .slice(-6)
+    .toUpperCase()
   return {
     id: r.id,
+    displayNo: `INQ-${ddmmyy}-${compactId || '000000'}`,
     pickup: r.pickup,
     destination: r.destination,
     itemDescription: r.item_description,
+    itemImageUrls: r.item_image_urls || [],
     status: r.status,
     quotesReleasedToCustomer: Boolean(r.quotes_released_to_customer),
-    createdAt: toIso(r.created_at) ?? r.created_at,
+    createdAt,
     customerName: r.customer_name,
     quoteCount: Number(r.quote_count) || 0,
+    matchedVendorCount: Number(r.matched_vendor_count) || 0,
   }
 }
 
@@ -163,6 +190,10 @@ function mapInquiryRow(r) {
           },
         }
       : {}),
+    quoteCount: r.quote_count != null ? Number(r.quote_count) : undefined,
+    matchedVendorCount: r.matched_vendor_count != null ? Number(r.matched_vendor_count) : undefined,
+    paymentConfirmationImageUrl: r.payment_confirmation_image_url || undefined,
+    paymentConfirmedAt: r.payment_confirmed_at ? toIso(r.payment_confirmed_at) : undefined,
   }
 }
 
@@ -212,6 +243,8 @@ app.get('/customer/inquiries', requireAuth(['customer']), async (req, res, next)
     const { rows } = await query(
       `
       SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
+             ,(SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count
+             ,(SELECT COUNT(*)::int FROM km_vendor_tokens t2 WHERE t2.inquiry_id = i.id) AS matched_vendor_count
       FROM km_inquiries i
       LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       WHERE i.created_by_user_id = $1
@@ -481,19 +514,37 @@ app.get('/admin/inquiries', requireAuth(['admin']), async (req, res, next) => {
   try {
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '10'), 10) || 10))
     const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0)
+    const q = String(req.query.q ?? '').trim()
     const fetchLimit = limit + 1
-    const { rows } = await query(
-      `
-      SELECT i.id, i.pickup, i.destination, i.item_description, i.status, i.quotes_released_to_customer, i.created_at,
-             u.name AS customer_name,
-             (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count
-      FROM km_inquiries i
-      JOIN user_profiles u ON u.id = i.created_by_user_id
-      ORDER BY i.created_at DESC
-      LIMIT $1 OFFSET $2
-      `,
-      [fetchLimit, offset],
-    )
+    const hasQuery = q.length > 0
+    const { rows } = hasQuery
+      ? await query(
+          `
+          SELECT i.id, i.pickup, i.destination, i.item_description, i.item_image_urls, i.status, i.quotes_released_to_customer, i.created_at,
+                 u.name AS customer_name,
+                 (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count,
+                 (SELECT COUNT(*)::int FROM km_vendor_tokens t WHERE t.inquiry_id = i.id) AS matched_vendor_count
+          FROM km_inquiries i
+          JOIN user_profiles u ON u.id = i.created_by_user_id
+          WHERE i.id ILIKE $3 OR u.name ILIKE $3
+          ORDER BY i.created_at DESC
+          LIMIT $1 OFFSET $2
+          `,
+          [fetchLimit, offset, `%${q}%`],
+        )
+      : await query(
+          `
+          SELECT i.id, i.pickup, i.destination, i.item_description, i.item_image_urls, i.status, i.quotes_released_to_customer, i.created_at,
+                 u.name AS customer_name,
+                 (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count,
+                 (SELECT COUNT(*)::int FROM km_vendor_tokens t WHERE t.inquiry_id = i.id) AS matched_vendor_count
+          FROM km_inquiries i
+          JOIN user_profiles u ON u.id = i.created_by_user_id
+          ORDER BY i.created_at DESC
+          LIMIT $1 OFFSET $2
+          `,
+          [fetchLimit, offset],
+        )
     const hasMore = rows.length > limit
     const slice = hasMore ? rows.slice(0, limit) : rows
     res.json({
@@ -511,7 +562,9 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
     const { rows } = await query(
       `
       SELECT i.*, u.name AS customer_name,
-             COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
+             COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids,
+             (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count,
+             (SELECT COUNT(*)::int FROM km_vendor_tokens t2 WHERE t2.inquiry_id = i.id) AS matched_vendor_count
       FROM km_inquiries i
       JOIN user_profiles u ON u.id = i.created_by_user_id
       LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
@@ -522,19 +575,68 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
     )
     if (!rows[0]) return res.status(404).json({ error: 'not_found' })
     const quoteRows = await query(`SELECT * FROM km_quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
-    const tokenRows = await query(`SELECT token, vendor_id FROM km_vendor_tokens WHERE inquiry_id = $1`, [req.params.id])
+    const tokenRows = await query(
+      `
+      SELECT t.token, t.vendor_id, v.name AS vendor_name
+      FROM km_vendor_tokens t
+      LEFT JOIN vendors v ON v.id = t.vendor_id
+      WHERE t.inquiry_id = $1
+      `,
+      [req.params.id],
+    )
     res.json({
       inquiry: {
         ...mapInquiryRow(rows[0]),
         customerName: rows[0].customer_name,
       },
       quotes: quoteRows.rows.map(mapQuoteRow),
-      tokens: tokenRows.rows.map((r) => ({ token: r.token, vendorId: r.vendor_id })),
+      tokens: tokenRows.rows.map((r) => ({ token: r.token, vendorId: r.vendor_id, vendorName: r.vendor_name || null })),
     })
   } catch (err) {
     next(err)
   }
 })
+
+app.post(
+  '/admin/inquiries/:id/confirm-payment',
+  requireTrustedOrigin,
+  requireAuth(['admin']),
+  async (req, res, next) => {
+    try {
+      const parsed = adminConfirmPaymentSchema.safeParse(req.body)
+      if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' })
+      await query(
+        `
+        UPDATE km_inquiries
+        SET payment_confirmation_image_url = $1,
+            payment_confirmed_at = NOW(),
+            status = CASE WHEN status = 'paid' THEN 'payment_confirmed' ELSE status END
+        WHERE id = $2
+        `,
+        [parsed.data.confirmationImageUrl, req.params.id],
+      )
+      res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+app.post(
+  '/admin/inquiries/:id/update-status',
+  requireTrustedOrigin,
+  requireAuth(['admin']),
+  async (req, res, next) => {
+    try {
+      const parsed = adminUpdateStatusSchema.safeParse(req.body)
+      if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' })
+      await query(`UPDATE km_inquiries SET status = $1 WHERE id = $2`, [parsed.data.status, req.params.id])
+      res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
 
 app.post(
   '/admin/inquiries/:id/release-quotes',
