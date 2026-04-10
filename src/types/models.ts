@@ -118,6 +118,8 @@ export interface Inquiry {
   matchedVendorIds: string[]
   /** Jika false, pelanggan belum boleh melihat/memilih penawaran sampai admin melepas. */
   quotesReleasedToCustomer?: boolean
+  /** Terset dari API setelah konfirmasi bayar (bukan Zustand). */
+  payment?: Payment
 }
 
 export interface VendorTokenEntry {
@@ -141,6 +143,8 @@ export interface VendorQuote {
   insuranceIncluded?: boolean
   /** Premi asuransi (IDR) jika disertakan */
   insurancePremium?: number
+  /** Dari GET /customer/inquiries/:id (penawaran terpilih + vendor). */
+  vendor?: { id: string; name: string; customerRating: number } | null
 }
 
 export interface Payment {

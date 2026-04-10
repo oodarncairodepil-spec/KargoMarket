@@ -1,14 +1,69 @@
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { InquiryRequestSummary } from '../../components/InquiryRequestSummary'
 import { Button } from '../../components/ui/Button'
 import { SectionCard } from '../../components/ui/SectionCard'
-import { useInquiryData } from '../../hooks/useInquiryData'
+import { apiClient } from '../../lib/apiClient'
 import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiryStatus'
+import type { Inquiry, VendorQuote } from '../../types/models'
 
 export function InquiryDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { inquiry, quotes, payment } = useInquiryData(id)
+  const [inquiry, setInquiry] = useState<Inquiry | null>(null)
+  const [quotes, setQuotes] = useState<VendorQuote[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!id) {
+      setInquiry(null)
+      setLoading(false)
+      return
+    }
+    let mounted = true
+    void (async () => {
+      try {
+        setLoading(true)
+        const inqRes = (await apiClient.get(`/customer/inquiries/${id}`)) as {
+          inquiry?: Inquiry
+        }
+        if (!mounted) return
+        if (!inqRes.inquiry) {
+          setInquiry(null)
+          setQuotes([])
+          return
+        }
+        setInquiry(inqRes.inquiry)
+        const quotesReleased = inqRes.inquiry.quotesReleasedToCustomer !== false
+        if (quotesReleased) {
+          try {
+            const qRes = (await apiClient.get(`/customer/inquiries/${id}/quotes`)) as { quotes?: VendorQuote[] }
+            if (mounted && Array.isArray(qRes.quotes)) setQuotes(qRes.quotes)
+          } catch {
+            if (mounted) setQuotes([])
+          }
+        } else if (mounted) {
+          setQuotes([])
+        }
+      } catch {
+        if (mounted) {
+          setInquiry(null)
+          setQuotes([])
+        }
+      } finally {
+        if (mounted) setLoading(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [id])
+
+  if (loading) {
+    return (
+      <SectionCard className="text-left text-sm text-slate-600">Memuat detail permintaan...</SectionCard>
+    )
+  }
 
   if (!id || !inquiry) {
     return (
@@ -98,7 +153,7 @@ export function InquiryDetailPage() {
         </Link>
       )}
 
-      {inquiry.status === 'paid' && payment?.vendorNotified && (
+      {inquiry.status === 'paid' && inquiry.payment?.vendorNotified && (
         <SectionCard className="border-emerald-100 bg-emerald-50/60 text-left text-sm text-emerald-900">
           <p className="font-semibold">Vendor telah diberi tahu (simulasi).</p>
           <p className="mt-1 text-emerald-800">Pembayaran tercatat. Terima kasih.</p>

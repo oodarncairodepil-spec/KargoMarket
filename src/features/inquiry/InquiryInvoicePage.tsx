@@ -1,20 +1,80 @@
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Card } from '../../components/Card'
 import { InquiryRequestSummary } from '../../components/InquiryRequestSummary'
 import { PageShell } from '../../components/PageShell'
 import { StickyCTA } from '../../components/StickyCTA'
-import { useInquiryData } from '../../hooks/useInquiryData'
+import { apiClient } from '../../lib/apiClient'
 import { formatIDR } from '../../lib/format'
 import { getVendorById } from '../../lib/matchVendors'
-import { useLogisticsStore } from '../../store/useLogisticsStore'
+import type { Inquiry, VendorQuote } from '../../types/models'
+
+type InquiryDetailPayload = {
+  inquiry?: Inquiry
+  selectedQuote?: VendorQuote
+}
 
 export function InquiryInvoicePage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { inquiry, quotes } = useInquiryData(id)
-  const setAwaitingPayment = useLogisticsStore((s) => s.setAwaitingPayment)
+  const [inquiry, setInquiry] = useState<Inquiry | null>(null)
+  const [selectedQuote, setSelectedQuote] = useState<VendorQuote | undefined>(undefined)
+  const [loading, setLoading] = useState(true)
+  const [beginError, setBeginError] = useState('')
 
-  if (!id || !inquiry) {
+  useEffect(() => {
+    if (!id) {
+      setInquiry(null)
+      setSelectedQuote(undefined)
+      setLoading(false)
+      return
+    }
+    let mounted = true
+    void (async () => {
+      try {
+        setLoading(true)
+        const res = (await apiClient.get(`/customer/inquiries/${id}`)) as InquiryDetailPayload
+        if (!mounted) return
+        if (!res.inquiry) {
+          setInquiry(null)
+          setSelectedQuote(undefined)
+          return
+        }
+        setInquiry(res.inquiry)
+        setSelectedQuote(res.selectedQuote)
+      } catch {
+        if (mounted) {
+          setInquiry(null)
+          setSelectedQuote(undefined)
+        }
+      } finally {
+        if (mounted) setLoading(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [id])
+
+  if (!id) {
+    return (
+      <PageShell title="Tidak ditemukan">
+        <Link to="/" className="text-accent">
+          Beranda
+        </Link>
+      </PageShell>
+    )
+  }
+
+  if (loading) {
+    return (
+      <PageShell title="Tagihan">
+        <p className="text-left text-sm text-slate-600">Memuat tagihan...</p>
+      </PageShell>
+    )
+  }
+
+  if (!inquiry) {
     return (
       <PageShell title="Tidak ditemukan">
         <Link to="/" className="text-accent">
@@ -25,9 +85,10 @@ export function InquiryInvoicePage() {
   }
 
   const inquiryId = id
+  const quote = selectedQuote
 
-  const quote = quotes.find((q) => q.id === inquiry.selectedQuoteId)
-  const vendor = quote ? getVendorById(quote.vendorId) : undefined
+  const vendorName =
+    quote?.vendor?.name ?? (quote ? getVendorById(quote.vendorId)?.name : undefined) ?? 'Vendor'
 
   if (!quote) {
     return (
@@ -43,9 +104,14 @@ export function InquiryInvoicePage() {
     )
   }
 
-  function goPay() {
-    setAwaitingPayment(inquiryId)
-    navigate(`/customer/inquiry/${inquiryId}/payment`)
+  async function goPay() {
+    setBeginError('')
+    try {
+      await apiClient.post(`/customer/inquiries/${inquiryId}/begin-payment`, {})
+      navigate(`/customer/inquiry/${inquiryId}/payment`)
+    } catch {
+      setBeginError('Tidak bisa melanjutkan ke pembayaran. Coba lagi atau refresh halaman.')
+    }
   }
 
   const paid = inquiry.status === 'paid' || inquiry.status === 'completed'
@@ -60,9 +126,12 @@ export function InquiryInvoicePage() {
           </Link>
         }
       >
+        {beginError ? (
+          <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-100">{beginError}</p>
+        ) : null}
         <Card className="text-left">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Vendor</p>
-          <p className="mt-1 text-lg font-semibold text-slate-900">{vendor?.name ?? 'Vendor'}</p>
+          <p className="mt-1 text-lg font-semibold text-slate-900">{vendorName}</p>
           <p className="mt-4 text-xs font-medium uppercase tracking-wide text-slate-500">Total</p>
           <p className="mt-1 text-3xl font-bold text-accent">{formatIDR(quote.price)}</p>
           <div className="mt-4 border-t border-slate-100 pt-4">
@@ -97,10 +166,10 @@ export function InquiryInvoicePage() {
       </PageShell>
 
       {!paid && (
-        <StickyCTA>
+        <StickyCTA aboveBottomNav>
           <button
             type="button"
-            onClick={goPay}
+            onClick={() => void goPay()}
             className="w-full min-h-12 rounded-xl bg-accent text-base font-semibold text-white shadow-md"
           >
             Lanjut bayar

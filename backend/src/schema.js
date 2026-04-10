@@ -43,7 +43,22 @@ const VENDORS = [
 
 export async function ensureSchema() {
   await query(`
-    CREATE TABLE IF NOT EXISTS users (
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'user_profiles'
+      ) THEN
+        ALTER TABLE public.users RENAME TO user_profiles;
+      END IF;
+    END $$;
+  `)
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
@@ -52,26 +67,47 @@ export async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `)
+
+  await query(`ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS auth_user_id UUID;`)
+
+  await query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'auth')
+         AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'auth' AND table_name = 'users')
+         AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_profiles_auth_user_id_fkey') THEN
+        ALTER TABLE public.user_profiles
+        ADD CONSTRAINT user_profiles_auth_user_id_fkey
+        FOREIGN KEY (auth_user_id) REFERENCES auth.users(id) ON DELETE SET NULL;
+      END IF;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+      WHEN undefined_table THEN NULL;
+    END $$;
+  `)
+
   await query(`
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES user_profiles(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       expires_at TIMESTAMPTZ NOT NULL
     );
   `)
+
   await query(`
     CREATE TABLE IF NOT EXISTS vendors (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      service_areas JSONB NOT NULL,
+      service_areas TEXT[] NOT NULL,
       customer_rating NUMERIC(2,1) NOT NULL
     );
   `)
+
   await query(`
-    CREATE TABLE IF NOT EXISTS inquiries (
+    CREATE TABLE IF NOT EXISTS km_inquiries (
       id TEXT PRIMARY KEY,
-      created_by_user_id TEXT NOT NULL REFERENCES users(id),
+      created_by_user_id TEXT NOT NULL REFERENCES user_profiles(id) ON DELETE RESTRICT,
       pickup TEXT NOT NULL,
       destination TEXT NOT NULL,
       pickup_address TEXT NOT NULL,
@@ -107,19 +143,25 @@ export async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `)
+
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS payment_proof_file_name TEXT`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS payment_proof_data_url TEXT`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`)
+
   await query(`
-    CREATE TABLE IF NOT EXISTS vendor_tokens (
+    CREATE TABLE IF NOT EXISTS km_vendor_tokens (
       token TEXT PRIMARY KEY,
-      inquiry_id TEXT NOT NULL REFERENCES inquiries(id) ON DELETE CASCADE,
+      inquiry_id TEXT NOT NULL REFERENCES km_inquiries(id) ON DELETE CASCADE,
       vendor_id TEXT NOT NULL REFERENCES vendors(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       revoked_at TIMESTAMPTZ
     );
   `)
+
   await query(`
-    CREATE TABLE IF NOT EXISTS quotes (
+    CREATE TABLE IF NOT EXISTS km_quotes (
       id TEXT PRIMARY KEY,
-      inquiry_id TEXT NOT NULL REFERENCES inquiries(id) ON DELETE CASCADE,
+      inquiry_id TEXT NOT NULL REFERENCES km_inquiries(id) ON DELETE CASCADE,
       vendor_id TEXT NOT NULL REFERENCES vendors(id),
       price INTEGER NOT NULL,
       eta TEXT NOT NULL,
@@ -146,21 +188,23 @@ export async function ensureSeedUsers() {
     password: adminPassword,
     role: 'admin',
     name: 'Admin KargoMarket',
+    authUserId: process.env.SEED_ADMIN_AUTH_USER_ID || null,
   })
   await upsertUser({
     email: customerEmail,
     password: customerPassword,
     role: 'customer',
     name: 'Customer Demo',
+    authUserId: process.env.SEED_CUSTOMER_AUTH_USER_ID || null,
   })
 }
 
-async function upsertUser({ email, password, role, name }) {
+async function upsertUser({ email, password, role, name, authUserId }) {
   const hash = await bcrypt.hash(password, 10)
   const userId = id('usr')
   await query(
     `
-    INSERT INTO users (id, email, password_hash, role, name)
+    INSERT INTO user_profiles (id, email, password_hash, role, name)
     VALUES ($1,$2,$3,$4,$5)
     ON CONFLICT (email) DO UPDATE
       SET password_hash = EXCLUDED.password_hash,
@@ -169,6 +213,9 @@ async function upsertUser({ email, password, role, name }) {
     `,
     [userId, email, hash, role, name],
   )
+  if (authUserId && /^[0-9a-f-]{36}$/i.test(authUserId)) {
+    await query(`UPDATE user_profiles SET auth_user_id = $1::uuid WHERE email = $2`, [authUserId, email])
+  }
 }
 
 export async function ensureSeedVendors() {

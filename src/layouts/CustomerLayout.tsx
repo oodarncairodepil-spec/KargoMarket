@@ -1,5 +1,5 @@
 import { Outlet, useLocation } from 'react-router-dom'
-import { BottomNav, InquiryIcon, PlusIcon, ProfileIcon } from '../components/ui/BottomNav'
+import { BottomNav, InquiryIcon, ProfileIcon } from '../components/ui/BottomNav'
 import { TopBar } from '../components/ui/TopBar'
 import { UserAvatarMenu } from '../components/UserAvatarMenu'
 
@@ -17,10 +17,20 @@ function titleFor(path: string): string {
 export function CustomerLayout() {
   const location = useLocation()
   const path = location.pathname
+  const inquiryIdMatch = path.match(/^\/customer\/inquiry\/([^/]+)/)
+  const inquiryPath = inquiryIdMatch ? `/customer/inquiry/${inquiryIdMatch[1]}` : '/customer/inquiries'
+  const backTo =
+    path.startsWith('/customer/inquiry/new') ||
+    path.startsWith('/customer/profile') ||
+    /^\/customer\/inquiry\/[^/]+$/.test(path)
+      ? '/customer/inquiries'
+      : path.includes('/quotes') || path.includes('/invoice') || path.includes('/payment')
+        ? inquiryPath
+        : undefined
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-lg flex-col px-4 pb-28">
-      <TopBar title={titleFor(path)} rightSlot={<UserAvatarMenu />} />
+      <TopBar title={titleFor(path)} backTo={backTo} backLabel="Kembali" rightSlot={<UserAvatarMenu />} />
       <main className="mt-4 flex flex-1 flex-col gap-4 pb-20">
         <Outlet />
       </main>
@@ -31,12 +41,6 @@ export function CustomerLayout() {
             label: 'Inquiries',
             icon: InquiryIcon,
             match: (p) => p.startsWith('/customer/inquiries'),
-          },
-          {
-            to: '/customer/inquiry/new',
-            label: 'Buat',
-            icon: PlusIcon,
-            match: (p) => p.startsWith('/customer/inquiry/new'),
           },
           {
             to: '/customer/profile',

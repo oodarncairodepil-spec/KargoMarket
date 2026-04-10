@@ -35,41 +35,13 @@ export default function App() {
         }
       >
         <Route path="inquiries" element={<CustomerInquiryHistoryPage />} />
+        <Route path="inquiry/new" element={<InquiryNewPage />} />
         <Route path="inquiry/:id" element={<InquiryDetailPage />} />
         <Route path="inquiry/:id/quotes" element={<InquiryQuotesPage />} />
+        <Route path="inquiry/:id/invoice" element={<InquiryInvoicePage />} />
+        <Route path="inquiry/:id/payment" element={<InquiryPaymentPage />} />
+        <Route path="profile" element={<ProfilePage />} />
       </Route>
-      <Route
-        path="/customer/inquiry/new"
-        element={
-          <RequireAuth allowRoles={['customer']}>
-            <InquiryNewPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/customer/inquiry/:id/invoice"
-        element={
-          <RequireAuth allowRoles={['customer']}>
-            <InquiryInvoicePage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/customer/inquiry/:id/payment"
-        element={
-          <RequireAuth allowRoles={['customer']}>
-            <InquiryPaymentPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/customer/profile"
-        element={
-          <RequireAuth allowRoles={['customer']}>
-            <ProfilePage />
-          </RequireAuth>
-        }
-      />
       <Route
         path="/admin"
         element={

@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { InquiryRequestSummary } from '../../components/InquiryRequestSummary'
 import { Button } from '../../components/ui/Button'
 import { SectionCard } from '../../components/ui/SectionCard'
 import { ui } from '../../lib/uiTokens'
+import { apiClient } from '../../lib/apiClient'
 import { formatIDR } from '../../lib/format'
 import {
   formatIdrThousandsFromDigits,
@@ -13,19 +14,30 @@ import {
 import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiryStatus'
 import { VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
 import { getVendorById } from '../../lib/matchVendors'
-import { useInquiryData } from '../../hooks/useInquiryData'
-import { getTokensForInquiry, useLogisticsStore } from '../../store/useLogisticsStore'
-import type { VehicleType } from '../../types/models'
+import type { Inquiry, QuoteSubmitPayload, VehicleType, VendorQuote } from '../../types/models'
 
 const inputClass = `mt-1 ${ui.form.input.compact}`
 
+type AdminInquiryDetail = Inquiry & { customerName?: string }
+
+type AdminDetailResponse = {
+  inquiry?: AdminInquiryDetail
+  quotes?: VendorQuote[]
+  tokens?: { token: string; vendorId: string }[]
+}
+
+function vendorQuoteUrl(token: string) {
+  if (typeof window === 'undefined') return `/vendor/quote/${token}`
+  return `${window.location.origin}/vendor/quote/${token}`
+}
+
 export function AdminInquiryDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { inquiry, quotes } = useInquiryData(id)
-  const tokenIndex = useLogisticsStore((s) => s.tokenIndex)
-  const getVendorQuoteLink = useLogisticsStore((s) => s.getVendorQuoteLink)
-  const adminAddManualQuote = useLogisticsStore((s) => s.adminAddManualQuote)
-  const releaseQuotesToCustomer = useLogisticsStore((s) => s.releaseQuotesToCustomer)
+  const [inquiry, setInquiry] = useState<AdminInquiryDetail | null>(null)
+  const [quotes, setQuotes] = useState<VendorQuote[]>([])
+  const [tokens, setTokens] = useState<{ token: string; vendorId: string }[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
 
   const [expandedVendor, setExpandedVendor] = useState<string | null>(null)
   const [manualPrice, setManualPrice] = useState('')
@@ -37,20 +49,97 @@ export function AdminInquiryDetailPage() {
   const [manualNotes, setManualNotes] = useState('')
   const [toast, setToast] = useState('')
 
+  const loadDetail = useCallback(async () => {
+    if (!id) return
+    setLoadError('')
+    const res = (await apiClient.get(`/admin/inquiries/${id}`)) as AdminDetailResponse
+    if (!res.inquiry) {
+      setInquiry(null)
+      setQuotes([])
+      setTokens([])
+      return
+    }
+    setInquiry(res.inquiry)
+    setQuotes(Array.isArray(res.quotes) ? res.quotes : [])
+    setTokens(Array.isArray(res.tokens) ? res.tokens : [])
+  }, [id])
+
+  useEffect(() => {
+    if (!id) {
+      setInquiry(null)
+      setQuotes([])
+      setTokens([])
+      setLoading(false)
+      return
+    }
+    let mounted = true
+    void (async () => {
+      try {
+        setLoading(true)
+        await loadDetail()
+      } catch (e) {
+        if (!mounted) return
+        if (e instanceof Error && e.message === 'not_found') {
+          setLoadError('')
+          setInquiry(null)
+          setQuotes([])
+          setTokens([])
+        } else {
+          setLoadError('Gagal memuat detail permintaan.')
+          setInquiry(null)
+          setQuotes([])
+          setTokens([])
+        }
+      } finally {
+        if (mounted) setLoading(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [id, loadDetail])
+
   const tokensByVendor = useMemo(() => {
-    if (!id) return new Map<string, string>()
     const map = new Map<string, string>()
-    for (const { token, vendorId } of getTokensForInquiry(tokenIndex, id)) {
+    for (const { token, vendorId } of tokens) {
       map.set(vendorId, token)
     }
     return map
-  }, [id, tokenIndex])
+  }, [tokens])
 
-  if (!id || !inquiry) {
+  if (!id) {
     return (
       <SectionCard>
-        <Link to="/admin" className="text-accent">
-          Kembali ke admin
+        <Link to="/admin/inquiries" className="text-accent">
+          Kembali ke daftar permintaan
+        </Link>
+      </SectionCard>
+    )
+  }
+
+  if (loading) {
+    return (
+      <SectionCard className="text-left text-sm text-slate-600">Memuat detail permintaan...</SectionCard>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <SectionCard className="text-left">
+        <p className="text-sm text-red-800">{loadError}</p>
+        <Link to="/admin/inquiries" className="mt-3 inline-block font-semibold text-accent">
+          Kembali ke daftar
+        </Link>
+      </SectionCard>
+    )
+  }
+
+  if (!inquiry) {
+    return (
+      <SectionCard>
+        <p className="text-sm text-slate-600">Permintaan tidak ditemukan.</p>
+        <Link to="/admin/inquiries" className="mt-3 inline-block font-semibold text-accent">
+          Kembali ke daftar permintaan
         </Link>
       </SectionCard>
     )
@@ -82,7 +171,7 @@ export function AdminInquiryDetailPage() {
     }
   }
 
-  function submitManual(vendorId: string) {
+  async function submitManual(vendorId: string) {
     const p = Number(manualPrice.replace(/\./g, '').replace(/,/g, '.'))
     if (!manualPrice.trim() || Number.isNaN(p) || p <= 0) {
       setToast('Harga tidak valid.')
@@ -97,7 +186,7 @@ export function AdminInquiryDetailPage() {
       setToast('Premi asuransi wajib jika asuransi disertakan.')
       return
     }
-    const res = adminAddManualQuote(inquiryId, vendorId, {
+    const payload: QuoteSubmitPayload = {
       price: Math.round(p),
       eta: manualEta.trim() || '—',
       pickupDate: manualDate.trim() || '—',
@@ -105,14 +194,42 @@ export function AdminInquiryDetailPage() {
       vehicleType: manualVehicleType,
       insuranceIncluded: manualInsuranceIncluded,
       insurancePremium: manualInsuranceIncluded ? prem : 0,
-    })
-    if (!res.ok) {
-      setToast('Gagal menyimpan (vendor tidak cocok).')
-      return
     }
-    setToast(res.updated ? 'Kutasi diperbarui.' : 'Kutasi disimpan.')
-    setTimeout(() => setToast(''), 3000)
+    try {
+      await apiClient.post(`/admin/inquiries/${inquiryId}/manual-quote`, { vendorId, payload })
+      await loadDetail()
+      setToast('Penawaran manual disimpan.')
+      setTimeout(() => setToast(''), 3000)
+    } catch {
+      setToast('Gagal menyimpan penawaran.')
+      setTimeout(() => setToast(''), 3000)
+    }
   }
+
+  async function copyVendorQuoteLink(token: string) {
+    const url = vendorQuoteUrl(token)
+    try {
+      await navigator.clipboard.writeText(url)
+      setToast('Tautan disalin.')
+    } catch {
+      setToast('Gagal menyalin tautan.')
+    }
+    setTimeout(() => setToast(''), 2500)
+  }
+
+  async function releaseToCustomer() {
+    try {
+      await apiClient.post(`/admin/inquiries/${inquiryId}/release-quotes`, {})
+      await loadDetail()
+      setToast('Penawaran sekarang terlihat oleh pelanggan.')
+      setTimeout(() => setToast(''), 3000)
+    } catch {
+      setToast('Gagal melepas penawaran ke pelanggan.')
+      setTimeout(() => setToast(''), 3000)
+    }
+  }
+
+  const customerLabel = inquiry.customerName?.trim() || 'Pelanggan'
 
   return (
     <div className="flex flex-col gap-4">
@@ -128,9 +245,9 @@ export function AdminInquiryDetailPage() {
 
       <SectionCard className="text-left">
         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Pelanggan</p>
-        <p className="mt-1 text-sm font-semibold text-slate-900">{inquiry.createdByName || 'Pelanggan'}</p>
+        <p className="mt-1 text-sm font-semibold text-slate-900">{customerLabel}</p>
         <div className="mt-3 border-t border-slate-100 pt-3">
-        <InquiryRequestSummary inquiry={inquiry} />
+          <InquiryRequestSummary inquiry={inquiry} />
         </div>
       </SectionCard>
 
@@ -140,15 +257,7 @@ export function AdminInquiryDetailPage() {
           <p className="mt-1 text-amber-900/90">
             Setelah Anda selesai meninjau respons vendor, tampilkan daftar penawaran agar pelanggan dapat memilih.
           </p>
-          <Button
-            type="button"
-            onClick={() => {
-              releaseQuotesToCustomer(inquiryId)
-              setToast('Penawaran sekarang terlihat oleh pelanggan.')
-              setTimeout(() => setToast(''), 3000)
-            }}
-            className="mt-4 w-full bg-amber-800 text-white"
-          >
+          <Button type="button" onClick={() => void releaseToCustomer()} className="mt-4 w-full bg-amber-800 text-white">
             Tampilkan penawaran ke pelanggan
           </Button>
         </SectionCard>
@@ -207,15 +316,40 @@ export function AdminInquiryDetailPage() {
               )}
 
               {token && (
-                <div className="mt-3 flex items-center justify-between rounded-lg bg-slate-50 p-2">
-                  <p className="truncate text-xs text-slate-500">{getVendorQuoteLink(token)}</p>
+                <div className="mt-3 flex min-w-0 items-center gap-1 rounded-lg bg-slate-50 p-2">
+                  <p className="min-w-0 flex-1 truncate text-xs text-slate-500">{vendorQuoteUrl(token)}</p>
+                  <button
+                    type="button"
+                    aria-label="Salin tautan ke clipboard"
+                    className="shrink-0 rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-accent"
+                    onClick={() => void copyVendorQuoteLink(token)}
+                  >
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden>
+                      <rect
+                        x="9"
+                        y="9"
+                        width="13"
+                        height="13"
+                        rx="2"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      />
+                      <path
+                        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
                   <button
                     type="button"
                     aria-label="Buka tautan vendor di tab baru"
-                    className="rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-accent"
-                    onClick={() => window.open(getVendorQuoteLink(token), '_blank', 'noopener,noreferrer')}
+                    className="shrink-0 rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-accent"
+                    onClick={() => window.open(vendorQuoteUrl(token), '_blank', 'noopener,noreferrer')}
                   >
-                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden>
                       <path
                         d="M14 5h5v5M10 14 19 5M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"
                         stroke="currentColor"
@@ -301,11 +435,7 @@ export function AdminInquiryDetailPage() {
                         onChange={(e) => setManualNotes(e.target.value)}
                       />
                     </label>
-                    <Button
-                      type="button"
-                      onClick={() => submitManual(vid)}
-                      fullWidth
-                    >
+                    <Button type="button" onClick={() => void submitManual(vid)} fullWidth>
                       Simpan penawaran manual
                     </Button>
                   </div>

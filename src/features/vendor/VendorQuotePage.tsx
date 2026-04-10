@@ -1,26 +1,31 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { Card } from '../../components/Card'
 import { InquiryRequestSummary } from '../../components/InquiryRequestSummary'
 import { PageShell } from '../../components/PageShell'
 import { StickyCTA } from '../../components/StickyCTA'
+import { Spinner } from '../../components/ui/Spinner'
+import { apiClient } from '../../lib/apiClient'
 import {
   formatIdrThousandsFromDigits,
   sanitizeIdrDigits,
 } from '../../lib/inquiryFormHelpers'
 import { VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
-import { getVendorById } from '../../lib/matchVendors'
-import { useLogisticsStore } from '../../store/useLogisticsStore'
-import type { VehicleType } from '../../types/models'
+import type { Inquiry, VehicleType } from '../../types/models'
 
 const inputClass =
   'mt-1 w-full min-h-12 rounded-xl border border-slate-200 bg-white px-4 py-3 text-base text-slate-900 shadow-sm outline-none ring-accent placeholder:text-slate-400 focus:border-accent focus:ring-2'
 
+type VendorQuoteContext = {
+  vendor: { id: string; name: string; customer_rating?: number } | null
+  inquiry: Inquiry
+}
+
 export function VendorQuotePage() {
   const { token } = useParams<{ token: string }>()
-  const tokenIndex = useLogisticsStore((s) => s.tokenIndex)
-  const inquiries = useLogisticsStore((s) => s.inquiries)
-  const submitVendorQuote = useLogisticsStore((s) => s.submitVendorQuote)
+
+  const [ctx, setCtx] = useState<VendorQuoteContext | null>(null)
+  const [loadState, setLoadState] = useState<'loading' | 'invalid' | 'error' | 'ready'>('loading')
 
   const [price, setPrice] = useState('')
   const [eta, setEta] = useState('')
@@ -31,18 +36,41 @@ export function VendorQuotePage() {
   const [notes, setNotes] = useState('')
   const [error, setError] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  const entry = useMemo(
-    () => (token ? tokenIndex[token] : undefined),
-    [token, tokenIndex],
-  )
-
-  const inquiry = useMemo(
-    () => (entry ? inquiries.find((i) => i.id === entry.inquiryId) : undefined),
-    [entry, inquiries],
-  )
-
-  const vendor = useMemo(() => (entry ? getVendorById(entry.vendorId) : undefined), [entry])
+  useEffect(() => {
+    if (!token) {
+      setLoadState('invalid')
+      return
+    }
+    let mounted = true
+    void (async () => {
+      try {
+        setLoadState('loading')
+        const res = (await apiClient.get(`/vendor/quote/${token}`)) as VendorQuoteContext
+        if (!mounted) return
+        if (!res.inquiry) {
+          setLoadState('invalid')
+          setCtx(null)
+          return
+        }
+        setCtx({ vendor: res.vendor ?? null, inquiry: res.inquiry })
+        setLoadState('ready')
+      } catch (e) {
+        if (!mounted) return
+        const msg = e instanceof Error ? e.message : ''
+        if (msg === 'invalid_token' || msg === 'not_found') {
+          setLoadState('invalid')
+        } else {
+          setLoadState('error')
+        }
+        setCtx(null)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [token])
 
   if (!token) {
     return (
@@ -52,20 +80,46 @@ export function VendorQuotePage() {
     )
   }
 
-  const quoteToken = token
+  if (loadState === 'loading') {
+    return (
+      <PageShell title="Penawaran vendor" showHomeLink={false}>
+        <div className="flex min-h-[40vh] flex-col items-center justify-center gap-3 text-slate-600">
+          <Spinner className="h-7 w-7" />
+          <p className="text-sm">Memuat permintaan...</p>
+        </div>
+      </PageShell>
+    )
+  }
 
-  if (!entry || !inquiry) {
+  if (loadState === 'error') {
     return (
       <PageShell title="Penawaran vendor" showHomeLink={false}>
         <Card className="text-center text-slate-700">
-          <p className="font-medium text-slate-900">Tautan tidak valid atau kedaluwarsa</p>
-          <p className="mt-2 text-sm text-slate-600">Hubungi admin jika Anda membutuhkan tautan baru.</p>
+          <p className="font-medium text-slate-900">Tidak dapat memuat halaman</p>
+          <p className="mt-2 text-sm text-slate-600">Periksa koneksi dan pastikan API berjalan, lalu coba lagi.</p>
         </Card>
       </PageShell>
     )
   }
 
-  function submit() {
+  if (loadState === 'invalid' || !ctx) {
+    return (
+      <PageShell title="Penawaran vendor" showHomeLink={false}>
+        <Card className="text-center text-slate-700">
+          <p className="font-medium text-slate-900">Tautan tidak valid atau tidak ditemukan</p>
+          <p className="mt-2 text-sm text-slate-600">
+            Token tidak ada di server (misalnya salah salin, inquiry dihapus, atau lingkungan beda database).
+            Hubungi admin untuk tautan baru.
+          </p>
+        </Card>
+      </PageShell>
+    )
+  }
+
+  const { inquiry, vendor } = ctx
+  const vendorName = vendor?.name
+
+  async function submit() {
     setError('')
     setSuccessMsg('')
     const p = Number(price.replace(/\./g, '').replace(/,/g, '.'))
@@ -88,33 +142,39 @@ export function VendorQuotePage() {
       return
     }
 
-    const result = submitVendorQuote(quoteToken, {
-      price: Math.round(p),
-      eta: eta.trim() || '—',
-      pickupDate: pickupDate.trim(),
-      notes: notes.trim(),
-      vehicleType: vehicleType || '',
-      insuranceIncluded,
-      insurancePremium: insuranceIncluded ? prem : 0,
-    })
-
-    if (!result.ok) {
-      setError('Tautan tidak valid.')
-      return
+    setSubmitting(true)
+    try {
+      await apiClient.post(`/vendor/quote/${token}`, {
+        price: Math.round(p),
+        eta: eta.trim() || '—',
+        pickupDate: pickupDate.trim(),
+        notes: notes.trim(),
+        vehicleType: vehicleType || '',
+        insuranceIncluded,
+        insurancePremium: insuranceIncluded ? prem : 0,
+      })
+      setSuccessMsg('Penawaran berhasil dikirim. Terima kasih.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : ''
+      if (msg === 'invalid_token') {
+        setError('Tautan tidak valid.')
+      } else if (msg === 'invalid_payload') {
+        setError('Data tidak valid. Periksa kolom wajib.')
+      } else if (msg === 'invalid_origin') {
+        setError('Akses ditolak origin. Hubungi admin.')
+      } else {
+        setError('Gagal mengirim penawaran. Coba lagi.')
+      }
+    } finally {
+      setSubmitting(false)
     }
-
-    setSuccessMsg(
-      result.updated
-        ? 'Anda sudah mengirim penawaran sebelumnya — data telah diperbarui.'
-        : 'Penawaran berhasil dikirim. Terima kasih.',
-    )
   }
 
   return (
     <>
       <PageShell title="Kirim penawaran" showHomeLink={false}>
         <p className="text-left text-sm text-slate-600">
-          Halo{vendor ? `, ${vendor.name}` : ''}. Isi cepat di bawah ini (kurang dari satu menit).
+          Halo{vendorName ? `, ${vendorName}` : ''}. Isi cepat di bawah ini (kurang dari satu menit).
         </p>
 
         <Card className="text-left">
@@ -215,10 +275,11 @@ export function VendorQuotePage() {
       <StickyCTA>
         <button
           type="button"
-          onClick={submit}
-          className="w-full min-h-12 rounded-xl bg-slate-900 text-base font-semibold text-white shadow-md"
+          disabled={submitting}
+          onClick={() => void submit()}
+          className="w-full min-h-12 rounded-xl bg-slate-900 text-base font-semibold text-white shadow-md disabled:opacity-50"
         >
-          Kirim penawaran
+          {submitting ? 'Mengirim…' : 'Kirim penawaran'}
         </button>
       </StickyCTA>
     </>

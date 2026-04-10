@@ -80,10 +80,20 @@ export function ProfileIcon({ className }: { className?: string }) {
 export function BottomNav({ items }: BottomNavProps) {
   const location = useLocation()
   const path = location.pathname
+  const colsClass =
+    items.length <= 1
+      ? 'grid-cols-1'
+      : items.length === 2
+        ? 'grid-cols-2'
+        : items.length === 3
+          ? 'grid-cols-3'
+          : items.length === 4
+            ? 'grid-cols-4'
+            : 'grid-cols-5'
 
   return (
     <nav className="fixed bottom-0 left-0 z-50 h-16 w-full border-t border-slate-200 bg-white/95 backdrop-blur" aria-label="Bottom navigation">
-      <div className={cn('mx-auto grid h-full w-full max-w-lg font-medium', items.length === 3 ? 'grid-cols-3' : 'grid-cols-4')}>
+      <div className={cn('mx-auto grid h-full w-full max-w-lg font-medium', colsClass)}>
         {items.map((item) => {
           const active = item.match(path)
           const Icon = item.icon

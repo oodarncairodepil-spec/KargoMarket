@@ -1,15 +1,40 @@
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { SectionCard } from '../../components/ui/SectionCard'
 import { Button } from '../../components/ui/Button'
+import { apiClient } from '../../lib/apiClient'
 import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiryStatus'
-import { useAuthStore } from '../../store/useAuthStore'
-import { useLogisticsStore } from '../../store/useLogisticsStore'
+import type { Inquiry } from '../../types/models'
 
 export function CustomerInquiryHistoryPage() {
-  const user = useAuthStore((s) => s.user)
-  const inquiries = useLogisticsStore((s) => s.inquiries)
-  const myInquiries = inquiries.filter((inq) => !inq.createdByUserId || inq.createdByUserId === user?.id)
+  const [items, setItems] = useState<Inquiry[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let mounted = true
+    void (async () => {
+      try {
+        setLoading(true)
+        const res = await apiClient.get('/customer/inquiries')
+        const inquiries =
+          res &&
+          typeof res === 'object' &&
+          'inquiries' in res &&
+          Array.isArray((res as { inquiries?: Inquiry[] }).inquiries)
+            ? (res as { inquiries: Inquiry[] }).inquiries
+            : []
+        if (mounted) setItems(inquiries)
+      } catch (err) {
+        if (mounted) setItems([])
+      } finally {
+        if (mounted) setLoading(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   return (
     <>
@@ -17,11 +42,13 @@ export function CustomerInquiryHistoryPage() {
         <Button fullWidth>+ Tambah permintaan baru</Button>
       </Link>
 
-      {myInquiries.length === 0 ? (
+      {loading ? (
+        <SectionCard className="text-center text-sm text-slate-600">Memuat permintaan...</SectionCard>
+      ) : items.length === 0 ? (
         <SectionCard className="text-center text-sm text-slate-600">Belum ada permintaan.</SectionCard>
       ) : (
         <div className="flex flex-col gap-3">
-          {myInquiries.map((inq) => (
+          {items.map((inq) => (
             <Link key={inq.id} to={`/customer/inquiry/${inq.id}`}>
               <SectionCard className="text-left">
                 <div className="flex flex-wrap items-center justify-between gap-2">

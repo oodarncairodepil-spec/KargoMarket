@@ -607,7 +607,12 @@ export function AdminVendorManagementPage() {
   if (view === 'list') {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            {!listLoading && (
+              <p className="text-sm font-medium text-slate-700">Total vendor: {vendorRegistrations.length}</p>
+            )}
+          </div>
           <Button type="button" size="sm" onClick={() => setViewMode('form')}>
             Tambah
           </Button>

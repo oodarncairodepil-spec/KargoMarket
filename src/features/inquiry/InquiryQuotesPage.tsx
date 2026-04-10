@@ -1,24 +1,68 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Badge } from '../../components/Badge'
 import { StickyCTA } from '../../components/StickyCTA'
 import { Button } from '../../components/ui/Button'
 import { SectionCard } from '../../components/ui/SectionCard'
 import { Select } from '../../components/ui/Select'
-import { useInquiryData } from '../../hooks/useInquiryData'
+import { apiClient } from '../../lib/apiClient'
 import { formatIDR, parseEtaDays } from '../../lib/format'
 import { getVendorById } from '../../lib/matchVendors'
 import { VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
-import { useLogisticsStore } from '../../store/useLogisticsStore'
-import type { VehicleType, VendorQuote } from '../../types/models'
+import type { Inquiry, VehicleType, VendorQuote } from '../../types/models'
 
 type SortKey = 'price' | 'eta' | 'rating'
 
 export function InquiryQuotesPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { inquiry, quotes: rawQuotes } = useInquiryData(id)
-  const selectQuote = useLogisticsStore((s) => s.selectQuote)
+  const [inquiry, setInquiry] = useState<Inquiry | null>(null)
+  const [rawQuotes, setRawQuotes] = useState<VendorQuote[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!id) {
+      setInquiry(null)
+      setRawQuotes([])
+      setLoading(false)
+      return
+    }
+    let mounted = true
+    void (async () => {
+      try {
+        setLoading(true)
+        const inqRes = (await apiClient.get(`/customer/inquiries/${id}`)) as { inquiry?: Inquiry }
+        if (!mounted) return
+        if (!inqRes.inquiry) {
+          setInquiry(null)
+          setRawQuotes([])
+          return
+        }
+        setInquiry(inqRes.inquiry)
+        const quotesReleased = inqRes.inquiry.quotesReleasedToCustomer !== false
+        if (quotesReleased) {
+          try {
+            const qRes = (await apiClient.get(`/customer/inquiries/${id}/quotes`)) as { quotes?: VendorQuote[] }
+            if (mounted && Array.isArray(qRes.quotes)) setRawQuotes(qRes.quotes)
+          } catch {
+            if (mounted) setRawQuotes([])
+          }
+        } else if (mounted) {
+          setRawQuotes([])
+        }
+      } catch {
+        if (mounted) {
+          setInquiry(null)
+          setRawQuotes([])
+        }
+      } finally {
+        if (mounted) setLoading(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [id])
 
   const [sort, setSort] = useState<SortKey>('price')
   const [insuranceOnly, setInsuranceOnly] = useState(false)
@@ -78,6 +122,10 @@ export function InquiryQuotesPage() {
     return list
   }, [filtered, sort])
 
+  if (loading) {
+    return <SectionCard className="text-sm text-slate-600">Memuat penawaran...</SectionCard>
+  }
+
   if (!id || !inquiry) {
     return (
       <SectionCard>
@@ -104,12 +152,16 @@ export function InquiryQuotesPage() {
 
   const canPick = inquiry.status === 'quotes_ready' && releasedToCustomer
 
-  function onConfirmChoice() {
+  async function onConfirmChoice() {
     if (!activePickId) return
     const q = rawQuotes.find((x) => x.id === activePickId)
     if (!q) return
-    selectQuote(inquiryId, q.id)
-    navigate(`/customer/inquiry/${inquiryId}/invoice`, { replace: false })
+    try {
+      await apiClient.post(`/customer/inquiries/${inquiryId}/select-quote`, { quoteId: q.id })
+      navigate(`/customer/inquiry/${inquiryId}/invoice`, { replace: false })
+    } catch {
+      /* handled by UI if needed */
+    }
   }
 
   function insuranceLine(q: VendorQuote) {
@@ -303,7 +355,7 @@ export function InquiryQuotesPage() {
           </p>
         )}
       {canPick && sorted.length > 0 && (
-        <StickyCTA>
+        <StickyCTA aboveBottomNav>
           <Button
             type="button"
             disabled={!activePickId}

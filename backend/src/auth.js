@@ -23,7 +23,7 @@ export function clearSessionCookie(res) {
 
 export async function loginWithPassword({ email, password, expectedRole }) {
   const result = await query(
-    `SELECT id, email, password_hash, role, name FROM users WHERE email = $1 LIMIT 1`,
+    `SELECT id, email, password_hash, role, name FROM user_profiles WHERE email = $1 LIMIT 1`,
     [email.toLowerCase().trim()],
   )
   const user = result.rows[0]
@@ -57,7 +57,7 @@ export async function sessionFromToken(token) {
     `
     SELECT u.id, u.email, u.role, u.name
     FROM sessions s
-    JOIN users u ON u.id = s.user_id
+    JOIN user_profiles u ON u.id = s.user_id
     WHERE s.token = $1
       AND s.expires_at > NOW()
     LIMIT 1

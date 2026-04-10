@@ -30,12 +30,12 @@ let initPromise = null
 export function ensureInitialized() {
   if (!initPromise) {
     initPromise = (async () => {
-      const shouldBootstrapAtRuntime =
+      const fullBootstrap =
         process.env.RUNTIME_DB_BOOTSTRAP === '1' || process.env.RUNTIME_DB_BOOTSTRAP === 'true'
-      if (process.env.VERCEL === '1' && !shouldBootstrapAtRuntime) {
+      await ensureSchema()
+      if (process.env.VERCEL === '1' && !fullBootstrap) {
         return
       }
-      await ensureSchema()
       await ensureSeedUsers()
       await ensureSeedVendors()
     })()
@@ -81,6 +81,13 @@ const quoteSchema = z.object({
   insurancePremium: z.number().int().nonnegative(),
 })
 
+const MAX_PAYMENT_PROOF_URL_CHARS = 400 * 1024
+
+const confirmPaymentSchema = z.object({
+  proofFileName: z.string().min(1),
+  proofDataUrl: z.string().nullable().optional(),
+})
+
 const inquirySchema = z.object({
   pickup: z.string(),
   destination: z.string(),
@@ -113,7 +120,14 @@ const inquirySchema = z.object({
   tncAcceptedAt: z.string(),
 })
 
+function toIso(v) {
+  if (v == null) return undefined
+  if (v instanceof Date) return v.toISOString()
+  return String(v)
+}
+
 function mapInquiryRow(r) {
+  const paidAt = r.paid_at != null ? toIso(r.paid_at) : undefined
   return {
     id: r.id,
     pickup: r.pickup,
@@ -149,7 +163,19 @@ function mapInquiryRow(r) {
     selectedQuoteId: r.selected_quote_id || undefined,
     matchedVendorIds: r.matched_vendor_ids || [],
     quotesReleasedToCustomer: Boolean(r.quotes_released_to_customer),
-    createdAt: r.created_at,
+    createdAt: toIso(r.created_at) ?? r.created_at,
+    ...(paidAt
+      ? {
+          payment: {
+            inquiryId: r.id,
+            quoteId: r.selected_quote_id || '',
+            proofFileName: r.payment_proof_file_name || '',
+            proofDataUrl: r.payment_proof_data_url ?? null,
+            paidAt,
+            vendorNotified: true,
+          },
+        }
+      : {}),
   }
 }
 
@@ -221,7 +247,7 @@ app.get('/auth/me', async (req, res, next) => {
       `
       SELECT u.id, u.email, u.role, u.name
       FROM sessions s
-      JOIN users u ON u.id = s.user_id
+      JOIN user_profiles u ON u.id = s.user_id
       WHERE s.token = $1
         AND s.expires_at > NOW()
       LIMIT 1
@@ -239,8 +265,8 @@ app.get('/customer/inquiries', requireAuth(['customer']), async (req, res, next)
     const { rows } = await query(
       `
       SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
-      FROM inquiries i
-      LEFT JOIN vendor_tokens t ON t.inquiry_id = i.id
+      FROM km_inquiries i
+      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       WHERE i.created_by_user_id = $1
       GROUP BY i.id
       ORDER BY i.created_at DESC
@@ -262,7 +288,7 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
     const matchedVendorIds = await getMatchedVendors(payload.destination)
     await query(
       `
-      INSERT INTO inquiries (
+      INSERT INTO km_inquiries (
         id, created_by_user_id, pickup, destination, pickup_address, pickup_kelurahan, pickup_kecamatan,
         pickup_kota, pickup_postal_code, destination_address, destination_kelurahan, destination_kecamatan,
         destination_kota, destination_postal_code, item_description, weight, dimensions, length_cm, width_cm,
@@ -310,7 +336,7 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
     for (const vendorId of matchedVendorIds) {
       await query(
         `
-        INSERT INTO vendor_tokens (token, inquiry_id, vendor_id)
+        INSERT INTO km_vendor_tokens (token, inquiry_id, vendor_id)
         VALUES ($1,$2,$3)
         `,
         [id('tok'), inquiryId, vendorId],
@@ -327,15 +353,35 @@ app.get('/customer/inquiries/:id', requireAuth(['customer']), async (req, res, n
     const { rows } = await query(
       `
       SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
-      FROM inquiries i
-      LEFT JOIN vendor_tokens t ON t.inquiry_id = i.id
+      FROM km_inquiries i
+      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       WHERE i.id = $1 AND i.created_by_user_id = $2
       GROUP BY i.id
       `,
       [req.params.id, req.user.id],
     )
     if (!rows[0]) return res.status(404).json({ error: 'not_found' })
-    res.json({ inquiry: mapInquiryRow(rows[0]) })
+    const row = rows[0]
+    const inquiry = mapInquiryRow(row)
+    let selectedQuote
+    if (row.selected_quote_id) {
+      const qq = await query(
+        `SELECT * FROM km_quotes WHERE id = $1 AND inquiry_id = $2 LIMIT 1`,
+        [row.selected_quote_id, row.id],
+      )
+      const qr = qq.rows[0]
+      if (qr) {
+        const vr = await query(`SELECT id, name, customer_rating FROM vendors WHERE id = $1 LIMIT 1`, [qr.vendor_id])
+        const v = vr.rows[0]
+        selectedQuote = {
+          ...mapQuoteRow(qr),
+          vendor: v
+            ? { id: v.id, name: v.name, customerRating: Number(v.customer_rating) }
+            : null,
+        }
+      }
+    }
+    res.json({ inquiry, selectedQuote })
   } catch (err) {
     next(err)
   }
@@ -344,7 +390,7 @@ app.get('/customer/inquiries/:id', requireAuth(['customer']), async (req, res, n
 app.get('/customer/inquiries/:id/quotes', requireAuth(['customer']), async (req, res, next) => {
   try {
     const { rows } = await query(
-      `SELECT * FROM inquiries WHERE id = $1 AND created_by_user_id = $2 LIMIT 1`,
+      `SELECT * FROM km_inquiries WHERE id = $1 AND created_by_user_id = $2 LIMIT 1`,
       [req.params.id, req.user.id],
     )
     const inquiry = rows[0]
@@ -352,7 +398,7 @@ app.get('/customer/inquiries/:id/quotes', requireAuth(['customer']), async (req,
     if (!inquiry.quotes_released_to_customer) {
       return res.status(403).json({ error: 'quotes_not_released' })
     }
-    const qr = await query(`SELECT * FROM quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
+    const qr = await query(`SELECT * FROM km_quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
     const vr = await query(`SELECT id, name, customer_rating FROM vendors`)
     const vendorMap = new Map(vr.rows.map((v) => [v.id, v]))
     const quotes = qr.rows.map((q) => ({
@@ -373,16 +419,16 @@ app.post(
   try {
     const quoteId = String(req.body?.quoteId || '')
     if (!quoteId) return res.status(400).json({ error: 'quote_required' })
-    const iq = await query(`SELECT * FROM inquiries WHERE id = $1 AND created_by_user_id = $2 LIMIT 1`, [
+    const iq = await query(`SELECT * FROM km_inquiries WHERE id = $1 AND created_by_user_id = $2 LIMIT 1`, [
       req.params.id,
       req.user.id,
     ])
     const inquiry = iq.rows[0]
     if (!inquiry) return res.status(404).json({ error: 'not_found' })
     if (!inquiry.quotes_released_to_customer) return res.status(403).json({ error: 'quotes_not_released' })
-    const qq = await query(`SELECT id FROM quotes WHERE id = $1 AND inquiry_id = $2 LIMIT 1`, [quoteId, req.params.id])
+    const qq = await query(`SELECT id FROM km_quotes WHERE id = $1 AND inquiry_id = $2 LIMIT 1`, [quoteId, req.params.id])
     if (!qq.rows[0]) return res.status(404).json({ error: 'quote_not_found' })
-    await query(`UPDATE inquiries SET selected_quote_id = $1, status = 'vendor_selected' WHERE id = $2`, [
+    await query(`UPDATE km_inquiries SET selected_quote_id = $1, status = 'vendor_selected' WHERE id = $2`, [
       quoteId,
       req.params.id,
     ])
@@ -393,15 +439,107 @@ app.post(
   },
 )
 
+app.post(
+  '/customer/inquiries/:id/begin-payment',
+  requireTrustedOrigin,
+  requireAuth(['customer']),
+  async (req, res, next) => {
+    try {
+      const r = await query(
+        `
+        UPDATE km_inquiries
+        SET status = 'awaiting_payment'
+        WHERE id = $1
+          AND created_by_user_id = $2
+          AND status IN ('vendor_selected', 'awaiting_payment')
+        RETURNING id
+        `,
+        [req.params.id, req.user.id],
+      )
+      if (!r.rows[0]) return res.status(409).json({ error: 'invalid_state' })
+      res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+app.post(
+  '/customer/inquiries/:id/confirm-payment',
+  requireTrustedOrigin,
+  requireAuth(['customer']),
+  async (req, res, next) => {
+    try {
+      const parsed = confirmPaymentSchema.safeParse(req.body)
+      if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' })
+      const { proofFileName, proofDataUrl } = parsed.data
+      let safeUrl = proofDataUrl ?? null
+      if (safeUrl && safeUrl.length > MAX_PAYMENT_PROOF_URL_CHARS) safeUrl = null
+
+      const iq = await query(
+        `SELECT id, status, selected_quote_id FROM km_inquiries WHERE id = $1 AND created_by_user_id = $2 LIMIT 1`,
+        [req.params.id, req.user.id],
+      )
+      const inquiry = iq.rows[0]
+      if (!inquiry) return res.status(404).json({ error: 'not_found' })
+      if (!inquiry.selected_quote_id) return res.status(409).json({ error: 'no_quote' })
+      const allowed =
+        inquiry.status === 'awaiting_payment' ||
+        inquiry.status === 'vendor_selected' ||
+        inquiry.status === 'paid'
+      if (!allowed) return res.status(409).json({ error: 'invalid_state' })
+      if (inquiry.status === 'paid') {
+        const fresh = await query(
+          `
+          SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
+          FROM km_inquiries i
+          LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
+          WHERE i.id = $1 AND i.created_by_user_id = $2
+          GROUP BY i.id
+          `,
+          [req.params.id, req.user.id],
+        )
+        return res.json({ inquiry: mapInquiryRow(fresh.rows[0]) })
+      }
+
+      await query(
+        `
+        UPDATE km_inquiries
+        SET status = 'paid',
+            payment_proof_file_name = $1,
+            payment_proof_data_url = $2,
+            paid_at = NOW()
+        WHERE id = $3 AND created_by_user_id = $4
+        `,
+        [proofFileName, safeUrl, req.params.id, req.user.id],
+      )
+      const fresh = await query(
+        `
+        SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
+        FROM km_inquiries i
+        LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
+        WHERE i.id = $1 AND i.created_by_user_id = $2
+        GROUP BY i.id
+        `,
+        [req.params.id, req.user.id],
+      )
+      res.json({ inquiry: mapInquiryRow(fresh.rows[0]) })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
 app.get('/admin/inquiries', requireAuth(['admin']), async (_req, res, next) => {
   try {
     const { rows } = await query(
       `
       SELECT i.*, u.name AS customer_name,
-             COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
-      FROM inquiries i
-      JOIN users u ON u.id = i.created_by_user_id
-      LEFT JOIN vendor_tokens t ON t.inquiry_id = i.id
+             COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids,
+             (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count
+      FROM km_inquiries i
+      JOIN user_profiles u ON u.id = i.created_by_user_id
+      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       GROUP BY i.id, u.name
       ORDER BY i.created_at DESC
       `,
@@ -410,6 +548,7 @@ app.get('/admin/inquiries', requireAuth(['admin']), async (_req, res, next) => {
       inquiries: rows.map((r) => ({
         ...mapInquiryRow(r),
         customerName: r.customer_name,
+        quoteCount: Number(r.quote_count) || 0,
       })),
     })
   } catch (err) {
@@ -423,17 +562,17 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
       `
       SELECT i.*, u.name AS customer_name,
              COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
-      FROM inquiries i
-      JOIN users u ON u.id = i.created_by_user_id
-      LEFT JOIN vendor_tokens t ON t.inquiry_id = i.id
+      FROM km_inquiries i
+      JOIN user_profiles u ON u.id = i.created_by_user_id
+      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       WHERE i.id = $1
       GROUP BY i.id, u.name
       `,
       [req.params.id],
     )
     if (!rows[0]) return res.status(404).json({ error: 'not_found' })
-    const quoteRows = await query(`SELECT * FROM quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
-    const tokenRows = await query(`SELECT token, vendor_id FROM vendor_tokens WHERE inquiry_id = $1`, [req.params.id])
+    const quoteRows = await query(`SELECT * FROM km_quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
+    const tokenRows = await query(`SELECT token, vendor_id FROM km_vendor_tokens WHERE inquiry_id = $1`, [req.params.id])
     res.json({
       inquiry: {
         ...mapInquiryRow(rows[0]),
@@ -453,7 +592,7 @@ app.post(
   requireAuth(['admin']),
   async (req, res, next) => {
   try {
-    await query(`UPDATE inquiries SET quotes_released_to_customer = TRUE WHERE id = $1`, [req.params.id])
+    await query(`UPDATE km_inquiries SET quotes_released_to_customer = TRUE WHERE id = $1`, [req.params.id])
     res.json({ ok: true })
   } catch (err) {
     next(err)
@@ -471,14 +610,14 @@ app.post(
     const payloadParse = quoteSchema.safeParse(req.body?.payload)
     if (!vendorId || !payloadParse.success) return res.status(400).json({ error: 'invalid_payload' })
     const payload = payloadParse.data
-    const existing = await query(`SELECT id FROM quotes WHERE inquiry_id = $1 AND vendor_id = $2 LIMIT 1`, [
+    const existing = await query(`SELECT id FROM km_quotes WHERE inquiry_id = $1 AND vendor_id = $2 LIMIT 1`, [
       req.params.id,
       vendorId,
     ])
     const quoteId = existing.rows[0]?.id || id('qt')
     await query(
       `
-      INSERT INTO quotes (
+      INSERT INTO km_quotes (
         id, inquiry_id, vendor_id, price, eta, pickup_date, notes, source,
         vehicle_type, insurance_included, insurance_premium
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'admin_manual',$8,$9,$10)
@@ -506,7 +645,7 @@ app.post(
         payload.insuranceIncluded ? payload.insurancePremium : null,
       ],
     )
-    await query(`UPDATE inquiries SET status = 'quotes_ready' WHERE id = $1 AND status = 'awaiting_quotes'`, [req.params.id])
+    await query(`UPDATE km_inquiries SET status = 'quotes_ready' WHERE id = $1 AND status = 'awaiting_quotes'`, [req.params.id])
     res.json({ ok: true })
   } catch (err) {
     next(err)
@@ -519,8 +658,8 @@ app.get('/vendor/quote/:token', async (req, res, next) => {
     const tr = await query(
       `
       SELECT t.token, t.vendor_id, i.*
-      FROM vendor_tokens t
-      JOIN inquiries i ON i.id = t.inquiry_id
+      FROM km_vendor_tokens t
+      JOIN km_inquiries i ON i.id = t.inquiry_id
       WHERE t.token = $1
       LIMIT 1
       `,
@@ -542,20 +681,20 @@ app.post('/vendor/quote/:token', requireTrustedOrigin, async (req, res, next) =>
   try {
     const payloadParse = quoteSchema.safeParse(req.body)
     if (!payloadParse.success) return res.status(400).json({ error: 'invalid_payload' })
-    const tr = await query(`SELECT inquiry_id, vendor_id FROM vendor_tokens WHERE token = $1 LIMIT 1`, [
+    const tr = await query(`SELECT inquiry_id, vendor_id FROM km_vendor_tokens WHERE token = $1 LIMIT 1`, [
       req.params.token,
     ])
     if (!tr.rows[0]) return res.status(404).json({ error: 'invalid_token' })
     const { inquiry_id: inquiryId, vendor_id: vendorId } = tr.rows[0]
     const payload = payloadParse.data
-    const existing = await query(`SELECT id FROM quotes WHERE inquiry_id = $1 AND vendor_id = $2 LIMIT 1`, [
+    const existing = await query(`SELECT id FROM km_quotes WHERE inquiry_id = $1 AND vendor_id = $2 LIMIT 1`, [
       inquiryId,
       vendorId,
     ])
     const quoteId = existing.rows[0]?.id || id('qt')
     await query(
       `
-      INSERT INTO quotes (
+      INSERT INTO km_quotes (
         id, inquiry_id, vendor_id, price, eta, pickup_date, notes, source,
         vehicle_type, insurance_included, insurance_premium
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'vendor_link',$8,$9,$10)
@@ -583,7 +722,7 @@ app.post('/vendor/quote/:token', requireTrustedOrigin, async (req, res, next) =>
         payload.insuranceIncluded ? payload.insurancePremium : null,
       ],
     )
-    await query(`UPDATE inquiries SET status = 'quotes_ready' WHERE id = $1 AND status = 'awaiting_quotes'`, [inquiryId])
+    await query(`UPDATE km_inquiries SET status = 'quotes_ready' WHERE id = $1 AND status = 'awaiting_quotes'`, [inquiryId])
     res.json({ ok: true })
   } catch (err) {
     next(err)

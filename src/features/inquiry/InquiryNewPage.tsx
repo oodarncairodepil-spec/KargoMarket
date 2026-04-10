@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PageShell } from '../../components/PageShell'
 import { ProgressSteps } from '../../components/ProgressSteps'
 import { StickyCTA } from '../../components/StickyCTA'
+import { apiClient } from '../../lib/apiClient'
 import {
   formatDimensionsCm,
   formatIdrDigitsString,
@@ -16,7 +16,6 @@ import {
 } from '../../lib/inquiryFormHelpers'
 import { SPECIAL_TREATMENTS, TNC_SUMMARY_LINES, VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
 import { useAuthStore } from '../../store/useAuthStore'
-import { useLogisticsStore } from '../../store/useLogisticsStore'
 import type { SpecialTreatmentType, VehicleType } from '../../types/models'
 
 const inputClass =
@@ -48,7 +47,6 @@ type InvalidField =
 
 export function InquiryNewPage() {
   const navigate = useNavigate()
-  const submitInquiry = useLogisticsStore((s) => s.submitInquiry)
   const user = useAuthStore((s) => s.user)
 
   const pickupAddressRef = useRef<HTMLTextAreaElement>(null)
@@ -104,6 +102,7 @@ export function InquiryNewPage() {
 
   const [error, setError] = useState('')
   const [invalidField, setInvalidField] = useState<InvalidField | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
   function fieldClass(field: InvalidField | null, key: InvalidField): string {
     if (field === key) return `${inputClass} ${invalidRing}`
@@ -116,6 +115,12 @@ export function InquiryNewPage() {
       if (el && 'focus' in el && typeof (el as HTMLInputElement).focus === 'function') {
         ;(el as HTMLInputElement).focus({ preventScroll: true })
       }
+    })
+  }
+
+  function scrollToTopBar() {
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
     })
   }
 
@@ -321,7 +326,8 @@ export function InquiryNewPage() {
     setItemImageUrls((prev) => prev.filter((_, i) => i !== index))
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
+    if (submitting) return
     setError('')
     setInvalidField(null)
     if (!tncAccepted) {
@@ -333,7 +339,7 @@ export function InquiryNewPage() {
 
     const w = weight.trim()
     const dims = formatDimensionsCm(lengthCm, widthCm, heightCm)
-    const id = submitInquiry({
+    const payload = {
       createdByUserId: user?.id,
       createdByName: user?.name,
       pickup: pickupKota.trim(),
@@ -365,8 +371,16 @@ export function InquiryNewPage() {
       additionalPacking: packingChoice === 'yes',
       budgetEstimate: budgetEstimate.replace(/\D/g, ''),
       tncAcceptedAt: new Date().toISOString(),
-    })
-    navigate(`/customer/inquiry/${id}`, { replace: true })
+    }
+    setSubmitting(true)
+    try {
+      const res = (await apiClient.post('/customer/inquiries', payload)) as { inquiryId?: string }
+      const newId = res && typeof res === 'object' && typeof res.inquiryId === 'string' ? res.inquiryId : null
+      navigate(newId ? `/customer/inquiry/${newId}` : '/customer/inquiries', { replace: true })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menyimpan permintaan')
+      setSubmitting(false)
+    }
   }
 
   const dimLine = formatDimensionsCm(lengthCm, widthCm, heightCm)
@@ -383,9 +397,15 @@ export function InquiryNewPage() {
       ? 'rounded-2xl border-2 border-red-500 bg-red-50/40 p-4 ring-2 ring-red-100'
       : 'rounded-2xl border border-slate-200 bg-slate-50/80 p-4'
 
+  useEffect(() => {
+    if (step > 0) {
+      scrollToTopBar()
+    }
+  }, [step])
+
   return (
     <>
-      <PageShell title="Permintaan pengiriman">
+      <div className="flex flex-col gap-4">
         <ProgressSteps step={step} />
         {error && (
           <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-100" role="alert">
@@ -922,9 +942,35 @@ export function InquiryNewPage() {
             </div>
           </div>
         )}
-      </PageShell>
 
-      <StickyCTA>
+        {(step > 0 || step === 3) && (
+          <div className="mt-2 flex gap-2">
+            {step > 0 && (
+              <button
+                type="button"
+                onClick={back}
+                className="min-h-12 flex-1 rounded-xl border border-slate-200 bg-white text-base font-semibold text-slate-800 shadow-sm"
+              >
+                Kembali
+              </button>
+            )}
+            {step === 3 && (
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => {
+                  void handleSubmit()
+                }}
+                className="min-h-12 flex-[2] rounded-xl bg-accent text-base font-semibold text-white shadow-md disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? 'Mengirim…' : 'Kirim permintaan'}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <StickyCTA aboveBottomNav>
         <div className="flex gap-2">
           {step > 0 && (
             <button
@@ -946,10 +992,13 @@ export function InquiryNewPage() {
           ) : (
             <button
               type="button"
-              onClick={handleSubmit}
-              className="min-h-12 flex-[2] rounded-xl bg-accent text-base font-semibold text-white shadow-md"
+              disabled={submitting}
+              onClick={() => {
+                void handleSubmit()
+              }}
+              className="min-h-12 flex-[2] rounded-xl bg-accent text-base font-semibold text-white shadow-md disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Kirim permintaan
+              {submitting ? 'Mengirim…' : 'Kirim permintaan'}
             </button>
           )}
         </div>
