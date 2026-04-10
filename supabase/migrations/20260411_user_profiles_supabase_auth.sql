@@ -31,6 +31,9 @@ begin
       set role = excluded.role,
           name = excluded.name;
 
+    -- FK masih ke legacy (id = usr_*). UUID auth bukan nilai id di legacy → wajib lepas FK dulu.
+    alter table public.km_inquiries drop constraint if exists km_inquiries_created_by_user_id_fkey;
+
     update public.km_inquiries i
     set created_by_user_id = l.auth_user_id::text
     from public.user_profiles_legacy l
