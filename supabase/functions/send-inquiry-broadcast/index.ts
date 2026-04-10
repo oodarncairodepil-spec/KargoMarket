@@ -33,6 +33,11 @@ type VendorRow = {
   is_active?: boolean | null
 }
 
+type TokenRow = {
+  token: string
+  vendor_id: string
+}
+
 function requiredEnv(name: string): string {
   const v = Deno.env.get(name)
   if (!v) throw new Error(`Missing env: ${name}`)
@@ -221,6 +226,40 @@ export async function sendInquiryBroadcast(inquiryId: string): Promise<Broadcast
   // Optional: enforce active vendors only if field is present.
   vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
 
+  // Fallback: jika data onboarding `origin_cities/destination_cities` belum terisi,
+  // gunakan daftar vendor yang sudah punya token di km_vendor_tokens (dibuat oleh backend).
+  // Ini memastikan broadcast tetap berjalan untuk inquiry yang sudah dibuat.
+  const tokensByVendor = new Map<string, string>()
+  if (vendors.length === 0) {
+    const { data: tokenRows, error: tokenErr } = await supabase
+      .from('km_vendor_tokens')
+      .select('token,vendor_id')
+      .eq('inquiry_id', inquiryId)
+      .is('revoked_at', null)
+      .returns<TokenRow[]>()
+    if (tokenErr) {
+      summary.failed += 1
+      summary.errors.push({ stage: 'vendor_query', message: tokenErr.message })
+      return summary
+    }
+    for (const t of tokenRows || []) tokensByVendor.set(t.vendor_id, t.token)
+    const vendorIds = Array.from(tokensByVendor.keys())
+    if (vendorIds.length > 0) {
+      const { data: vendorRows, error: vErr } = await supabase
+        .from('vendors')
+        .select('id,name,email,is_active')
+        .in('id', vendorIds)
+        .returns<VendorRow[]>()
+      if (vErr) {
+        summary.failed += 1
+        summary.errors.push({ stage: 'vendor_query', message: vErr.message })
+        return summary
+      }
+      vendors = (vendorRows || []).filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+      console.log(`[broadcast] fallback_from_tokens vendors=${vendors.length} tokens=${vendorIds.length}`)
+    }
+  }
+
   console.log(`[broadcast] inquiry=${inquiry.id} match=${vendors.length} origin=${originCity} dest=${destinationCity}`)
 
   const quoteBaseUrl = baseUrlFromEnv()
@@ -247,7 +286,7 @@ export async function sendInquiryBroadcast(inquiryId: string): Promise<Broadcast
         continue
       }
 
-      let token = existing?.token || null
+      let token = existing?.token || tokensByVendor.get(vendorId) || null
       if (!token || existing?.revoked_at) {
         // Insert new token, retry on collision a few times.
         const maxTries = 3

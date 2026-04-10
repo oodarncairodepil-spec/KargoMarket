@@ -38,6 +38,41 @@ export function ensureInitialized() {
   return initPromise
 }
 
+async function invokeBroadcastEdgeFunction(inquiryId) {
+  // Best-effort: jangan gagalkan create inquiry kalau email gagal.
+  const base = (config.supabaseUrl || '').replace(/\/$/, '')
+  const key = config.supabaseServiceRoleKey
+  if (!base || !key) {
+    console.warn('Broadcast skipped: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
+    return
+  }
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), 2500)
+  try {
+    const res = await fetch(`${base}/functions/v1/send-inquiry-broadcast`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ inquiryId }),
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      console.warn('Broadcast invoke failed', res.status, text)
+      return
+    }
+    const body = await res.json().catch(() => null)
+    console.log('Broadcast invoked', body)
+  } catch (e) {
+    console.warn('Broadcast invoke error', e instanceof Error ? e.message : String(e))
+  } finally {
+    clearTimeout(t)
+  }
+}
+
 function requireTrustedOrigin(req, res, next) {
   const origin = req.get('origin')
   if (!origin || config.appOrigins.includes(origin)) return next()
@@ -325,6 +360,8 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
         [id('tok'), inquiryId, vendorId],
       )
     }
+    // Fire broadcast (Resend) via Supabase Edge Function.
+    await invokeBroadcastEdgeFunction(inquiryId)
     res.status(201).json({ inquiryId })
   } catch (err) {
     next(err)
