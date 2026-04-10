@@ -13,8 +13,9 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true)
-      if (config.appOrigins.includes(origin)) return callback(null, true)
-      return callback(new Error('CORS origin not allowed'))
+      // Jangan throw error di sini (akan jadi 500 di Vercel). Cukup "deny" CORS
+      // agar browser memblokir, dan untuk POST kita pakai `requireTrustedOrigin`.
+      return callback(null, config.appOrigins.includes(origin))
     },
     credentials: true,
   }),
