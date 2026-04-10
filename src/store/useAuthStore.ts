@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { apiClient } from '../lib/apiClient'
+import { supabase } from '../lib/supabase'
+import { API_BASE_URL } from '../lib/apiClient'
 
 export type AuthRole = 'customer' | 'admin'
 
@@ -20,6 +21,18 @@ interface AuthState {
   logout: () => Promise<void>
 }
 
+async function fetchMe(accessToken: string): Promise<AuthUser | null> {
+  const res = await fetch(`${API_BASE_URL}/auth/me`, {
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+  if (!res.ok) return null
+  const body = (await res.json()) as { user: AuthUser | null }
+  return body.user ?? null
+}
+
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
   hydrated: false,
@@ -28,31 +41,46 @@ export const useAuthStore = create<AuthState>((set) => ({
   hydrateMe: async () => {
     set({ loading: true, error: '' })
     try {
-      const data = (await apiClient.get('/auth/me')) as { user: AuthUser | null }
-      set({ user: data.user, hydrated: true, loading: false, error: '' })
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) {
+        set({ user: null, hydrated: true, loading: false })
+        return
+      }
+      const user = await fetchMe(token)
+      set({ user, hydrated: true, loading: false, error: '' })
     } catch {
       set({ user: null, hydrated: true, loading: false })
     }
   },
   login: async ({ email, password }) => {
     set({ loading: true, error: '' })
-    try {
-      const data = (await apiClient.post('/auth/login', { email, password })) as { user: AuthUser }
-      set({ user: data.user, loading: false, error: '' })
-      return data.user
-    } catch (err) {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error || !data.session?.access_token) {
       set({
         user: null,
         loading: false,
-        error: err instanceof Error ? err.message : 'login_failed',
+        error: error?.message || 'login_failed',
       })
-      throw err
+      throw new Error(error?.message || 'login_failed')
     }
+    const user = await fetchMe(data.session.access_token)
+    if (!user) {
+      await supabase.auth.signOut()
+      set({
+        user: null,
+        loading: false,
+        error: 'no_profile',
+      })
+      throw new Error('no_profile')
+    }
+    set({ user, loading: false, error: '' })
+    return user
   },
   logout: async () => {
     set({ loading: true, error: '' })
     try {
-      await apiClient.post('/auth/logout')
+      await supabase.auth.signOut()
     } finally {
       set({ user: null, loading: false })
     }

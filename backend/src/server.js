@@ -1,16 +1,14 @@
-import cookieParser from 'cookie-parser'
 import cors from 'cors'
 import express from 'express'
 import { z } from 'zod'
-import { clearSessionCookie, deleteSession, loginWithPassword, requireAuth, setSessionCookie } from './auth.js'
+import { requireAuth, resolveUserFromRequest } from './auth.js'
 import { config } from './config.js'
 import { query } from './db.js'
-import { ensureSchema, ensureSeedUsers, ensureSeedVendors } from './schema.js'
+import { ensureSchema, ensureSeedVendors } from './schema.js'
 import { id, normalizeArea } from './utils.js'
 
 export const app = express()
 app.use(express.json({ limit: '2mb' }))
-app.use(cookieParser())
 app.use(
   cors({
     origin(origin, callback) {
@@ -22,9 +20,6 @@ app.use(
   }),
 )
 
-const loginWindowMs = 5 * 60 * 1000
-const loginLimit = 20
-const loginAttempts = new Map()
 let initPromise = null
 
 export function ensureInitialized() {
@@ -36,7 +31,6 @@ export function ensureInitialized() {
       if (process.env.VERCEL === '1' && !fullBootstrap) {
         return
       }
-      await ensureSeedUsers()
       await ensureSeedVendors()
     })()
   }
@@ -48,28 +42,6 @@ function requireTrustedOrigin(req, res, next) {
   if (!origin || config.appOrigins.includes(origin)) return next()
   return res.status(403).json({ error: 'invalid_origin' })
 }
-
-function rateLimitLogin(req, res, next) {
-  const ip = req.ip || req.socket?.remoteAddress || 'unknown'
-  const now = Date.now()
-  const record = loginAttempts.get(ip) || { count: 0, resetAt: now + loginWindowMs }
-  if (now > record.resetAt) {
-    record.count = 0
-    record.resetAt = now + loginWindowMs
-  }
-  record.count += 1
-  loginAttempts.set(ip, record)
-  if (record.count > loginLimit) {
-    return res.status(429).json({ error: 'too_many_login_attempts' })
-  }
-  return next()
-}
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-  role: z.enum(['customer', 'admin']).optional(),
-})
 
 const quoteSchema = z.object({
   price: z.number().int().positive(),
@@ -211,50 +183,10 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/auth/login', requireTrustedOrigin, rateLimitLogin, async (req, res, next) => {
-  try {
-    const parsed = loginSchema.safeParse(req.body)
-    if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' })
-    const result = await loginWithPassword({
-      email: parsed.data.email,
-      password: parsed.data.password,
-      expectedRole: parsed.data.role,
-    })
-    if (!result) return res.status(401).json({ error: 'invalid_credentials' })
-    setSessionCookie(res, result.token)
-    return res.json({ user: result.user })
-  } catch (err) {
-    return next(err)
-  }
-})
-
-app.post('/auth/logout', requireTrustedOrigin, async (req, res, next) => {
-  try {
-    const token = req.cookies?.km_session
-    await deleteSession(token)
-    clearSessionCookie(res)
-    res.json({ ok: true })
-  } catch (err) {
-    next(err)
-  }
-})
-
 app.get('/auth/me', async (req, res, next) => {
   try {
-    const token = req.cookies?.[config.sessionCookieName]
-    if (!token) return res.json({ user: null })
-    const result = await query(
-      `
-      SELECT u.id, u.email, u.role, u.name
-      FROM sessions s
-      JOIN user_profiles u ON u.id = s.user_id
-      WHERE s.token = $1
-        AND s.expires_at > NOW()
-      LIMIT 1
-      `,
-      [token],
-    )
-    return res.json({ user: result.rows[0] || null })
+    const user = await resolveUserFromRequest(req)
+    return res.json({ user })
   } catch (err) {
     return next(err)
   }

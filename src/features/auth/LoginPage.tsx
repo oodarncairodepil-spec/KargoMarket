@@ -40,8 +40,15 @@ export function LoginPage() {
       } else {
         navigate(user.role === 'admin' ? '/admin' : '/customer/inquiries', { replace: true })
       }
-    } catch {
-      setLocalError('Login gagal. Periksa email/password atau pastikan server API aktif.')
+    } catch (err) {
+      const code = err instanceof Error ? err.message : ''
+      if (code === 'no_profile') {
+        setLocalError(
+          'Akun Supabase Anda belum punya profil di aplikasi. Minta admin menambahkan baris di tabel user_profiles (id = UUID pengguna, role, name).',
+        )
+      } else {
+        setLocalError('Login gagal. Periksa email/password, Supabase Auth, dan koneksi ke API.')
+      }
     }
   }
 

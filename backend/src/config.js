@@ -9,7 +9,8 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
   databaseUrl: process.env.DATABASE_URL || '',
-  sessionCookieName: 'km_session',
+  supabaseUrl: (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim(),
+  supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim(),
 }
 
 if (!config.databaseUrl) {

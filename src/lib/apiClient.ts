@@ -1,15 +1,25 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:4000' : '/api')
+import { supabase } from './supabase'
+
+export const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:4000' : '/api')
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession()
+  const t = data.session?.access_token
+  return t ? { Authorization: `Bearer ${t}` } : {}
+}
 
 async function request(path: string, init?: RequestInit) {
   let res: Response
+  const extra = await authHeaders()
   try {
-    res = await fetch(`${API_BASE}${path}`, {
-      credentials: 'include',
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
       headers: {
         'Content-Type': 'application/json',
+        ...extra,
         ...(init?.headers || {}),
       },
-      ...init,
     })
   } catch {
     throw new Error('api_unreachable')

@@ -1,11 +1,10 @@
-import { ensureSchema, ensureSeedUsers, ensureSeedVendors } from './schema.js'
+import { ensureSchema, ensureSeedVendors } from './schema.js'
 import { pool } from './db.js'
 
 async function run() {
   await ensureSchema()
-  await ensureSeedUsers()
   await ensureSeedVendors()
-  console.log('Seed completed.')
+  console.log('Seed completed (vendors only). Buat pengguna di Supabase Auth + baris user_profiles.)')
 }
 
 run()
