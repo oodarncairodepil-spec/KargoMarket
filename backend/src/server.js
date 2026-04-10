@@ -313,7 +313,9 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
         payload.tncAcceptedAt,
       ],
     )
-    for (const vendorId of matchedVendorIds) {
+    // Hindari duplikat vendor yang bisa memicu constraint error.
+    const uniqueVendorIds = Array.from(new Set(matchedVendorIds))
+    for (const vendorId of uniqueVendorIds) {
       await query(
         `
         INSERT INTO km_vendor_tokens (token, inquiry_id, vendor_id)
@@ -783,6 +785,21 @@ app.post('/vendor/quote/:token', requireTrustedOrigin, async (req, res, next) =>
 
 app.use((err, _req, res, _next) => {
   console.error(err)
+  // Beri error yang lebih informatif untuk kasus migrasi DB belum terpasang di production.
+  const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : ''
+  const message = err instanceof Error ? err.message : ''
+  if (code === '42P01') {
+    // undefined_table
+    return res.status(500).json({ error: 'db_missing_table', detail: message })
+  }
+  if (code === '42703') {
+    // undefined_column
+    return res.status(500).json({ error: 'db_missing_column', detail: message })
+  }
+  if (code === '23503') {
+    // foreign_key_violation
+    return res.status(500).json({ error: 'db_fk_violation', detail: message })
+  }
   res.status(500).json({ error: 'internal_error' })
 })
 
