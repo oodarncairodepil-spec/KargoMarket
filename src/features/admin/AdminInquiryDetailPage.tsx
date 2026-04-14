@@ -25,6 +25,7 @@ type AdminInquiryDetail = Inquiry & { customerName?: string }
 type VendorTokenInfo = {
   token: string
   vendorId: string
+  lastBroadcastSentAt?: string | null
   vendorName?: string | null
   originCities?: string[]
   destinationCities?: string[]
@@ -48,6 +49,16 @@ type AdminDetailResponse = {
 function vendorQuoteUrl(token: string) {
   if (typeof window === 'undefined') return `/vendor/quote/${token}`
   return `${window.location.origin}/vendor/quote/${token}`
+}
+
+function formatBroadcastDateTime(value: string | null | undefined): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return d.toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }
 
 const VENDOR_QUOTE_FILTER_ALL = 'all' as const
@@ -186,6 +197,8 @@ export function AdminInquiryDetailPage() {
   const [routeVendors, setRouteVendors] = useState<RouteVendorProfile[]>([])
   const [broadcastVendorIds, setBroadcastVendorIds] = useState<string[]>([])
   const [broadcastSubmitting, setBroadcastSubmitting] = useState(false)
+  const [broadcastProgressPct, setBroadcastProgressPct] = useState(0)
+  const broadcastProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadDetail = useCallback(async () => {
     if (!id) return
@@ -346,6 +359,7 @@ export function AdminInquiryDetailPage() {
   useEffect(() => {
     return () => {
       if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current)
+      if (broadcastProgressTimerRef.current) clearInterval(broadcastProgressTimerRef.current)
     }
   }, [])
 
@@ -481,8 +495,31 @@ export function AdminInquiryDetailPage() {
     setBroadcastVendorIds((prev) => (prev.includes(vid) ? prev.filter((x) => x !== vid) : [...prev, vid]))
   }
 
+  function stopBroadcastProgressTicker() {
+    if (broadcastProgressTimerRef.current) {
+      clearInterval(broadcastProgressTimerRef.current)
+      broadcastProgressTimerRef.current = null
+    }
+  }
+
+  function startBroadcastProgressTicker() {
+    stopBroadcastProgressTicker()
+    setBroadcastProgressPct(8)
+    broadcastProgressTimerRef.current = setInterval(() => {
+      setBroadcastProgressPct((prev) => {
+        if (prev >= 92) return prev
+        const step = prev < 45 ? 9 : prev < 75 ? 5 : 2
+        return Math.min(92, prev + step)
+      })
+    }, 420)
+  }
+
   function selectAllFilteredForBroadcast() {
     setBroadcastVendorIds([...filteredMatchedVendorIds])
+  }
+
+  function selectAllRouteSupportedForBroadcast() {
+    setBroadcastVendorIds([...routeSupportedVendorIds])
   }
 
   function clearBroadcastSelection() {
@@ -492,6 +529,7 @@ export function AdminInquiryDetailPage() {
   async function sendVendorEmailBroadcast() {
     if (!inquiryId || broadcastVendorIds.length === 0 || broadcastSubmitting) return
     setBroadcastSubmitting(true)
+    startBroadcastProgressTicker()
     setToast('')
     try {
       const res = (await apiClient.post(`/admin/inquiries/${inquiryId}/broadcast`, {
@@ -509,7 +547,11 @@ export function AdminInquiryDetailPage() {
     } catch (e) {
       setToast(e instanceof Error ? e.message : 'Gagal mengirim email ke vendor.')
     } finally {
+      stopBroadcastProgressTicker()
+      setBroadcastProgressPct(100)
+      await new Promise((resolve) => setTimeout(resolve, 350))
       setBroadcastSubmitting(false)
+      setBroadcastProgressPct(0)
       setTimeout(() => setToast(''), 6000)
     }
   }
@@ -575,6 +617,23 @@ export function AdminInquiryDetailPage() {
     <div className="flex flex-col gap-4">
       {toast && (
         <p className="rounded-xl bg-slate-900 px-3 py-2 text-sm text-white shadow-md">{toast}</p>
+      )}
+      {broadcastSubmitting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-4 text-left shadow-2xl">
+            <p className="text-sm font-semibold text-slate-900">Mengirim email broadcast…</p>
+            <p className="mt-1 text-xs text-slate-600">
+              Mohon tunggu. Proses pengiriman sedang berjalan ke {broadcastVendorIds.length} vendor terpilih.
+            </p>
+            <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full rounded-full bg-accent transition-[width] duration-300"
+                style={{ width: `${broadcastProgressPct}%` }}
+              />
+            </div>
+            <p className="mt-2 text-xs font-medium text-slate-600">{broadcastProgressPct}%</p>
+          </div>
+        </div>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -713,7 +772,17 @@ export function AdminInquiryDetailPage() {
             Centang vendor lalu kirim undangan email (link penawaran). Hanya vendor yang punya email aktif di
             database yang akan menerima pesan.
           </p>
+          <p className="mt-1 text-xs font-medium text-slate-600">
+            Dipilih: {broadcastVendorIds.length} dari {routeSupportedVendorIds.length} vendor rute
+          </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={selectAllRouteSupportedForBroadcast}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
+            >
+              Pilih semua vendor rute
+            </button>
             <button
               type="button"
               onClick={selectAllFilteredForBroadcast}
@@ -749,6 +818,8 @@ export function AdminInquiryDetailPage() {
           const vendor = getVendorById(vid)
           const name = tokenNameByVendor.get(vid) || routeVendorNameById.get(vid) || vendor?.name || vid
           const token = tokensByVendor.get(vid)
+          const tokenMeta = tokenProfileByVendor.get(vid)
+          const broadcastSentAt = tokenMeta?.lastBroadcastSentAt || null
           const quote = quotes.find((q) => q.vendorId === vid)
           const hasQuote = Boolean(quote)
           const selectedForBroadcast = broadcastVendorIds.includes(vid)
@@ -787,10 +858,16 @@ export function AdminInquiryDetailPage() {
                       <Badge variant={hasQuote ? 'success' : 'neutral'} className="text-[10px]">
                         {hasQuote ? 'Sudah merespons' : 'Belum merespons'}
                       </Badge>
+                      <Badge variant={broadcastSentAt ? 'success' : 'neutral'} className="text-[10px]">
+                        {broadcastSentAt ? 'Email terkirim' : 'Email belum dikirim'}
+                      </Badge>
                     </div>
                     <p className="mt-1 text-xs text-slate-500">
                       Harga: {quote ? formatIDR(quote.price) : '—'} • ETA: {quote?.eta || '—'} • Jemput:{' '}
                       {quote?.pickupDate || '—'}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Broadcast terakhir: {formatBroadcastDateTime(broadcastSentAt)}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">

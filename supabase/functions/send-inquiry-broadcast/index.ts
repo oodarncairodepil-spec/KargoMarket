@@ -121,6 +121,26 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+async function markBroadcastSentAt(input: {
+  supabase: ReturnType<typeof createClient>
+  inquiryId: string
+  vendorId: string
+}): Promise<void> {
+  const nowIso = new Date().toISOString()
+  const { error } = await input.supabase
+    .from('km_vendor_tokens')
+    .update({ last_broadcast_sent_at: nowIso })
+    .eq('inquiry_id', input.inquiryId)
+    .eq('vendor_id', input.vendorId)
+    .is('revoked_at', null)
+  if (error) {
+    // Jangan menggagalkan alur kalau email sebenarnya sudah terkirim.
+    console.log(
+      `[broadcast] warn failed_to_mark_sent inquiryId=${input.inquiryId} vendorId=${input.vendorId} err=${error.message}`,
+    )
+  }
+}
+
 function escapeHtml(s: string): string {
   return s
     .replaceAll('&', '&amp;')
@@ -480,6 +500,7 @@ export async function sendInquiryBroadcast(
       })
 
       await sendEmail({ to: vendorEmail, subject, html })
+      await markBroadcastSentAt({ supabase, inquiryId, vendorId })
       summary.success += 1
       console.log(`[broadcast] sent vendorId=${vendorId} email=${vendorEmail}`)
     } catch (err) {

@@ -795,6 +795,7 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
       SELECT
         t.token,
         t.vendor_id,
+        t.last_broadcast_sent_at,
         v.name AS vendor_name,
         COALESCE(v.origin_cities, '{}'::text[]) AS origin_cities,
         COALESCE(v.destination_cities, '{}'::text[]) AS destination_cities,
@@ -814,6 +815,7 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
       tokens: tokenRows.rows.map((r) => ({
         token: r.token,
         vendorId: r.vendor_id,
+        lastBroadcastSentAt: r.last_broadcast_sent_at || null,
         vendorName: r.vendor_name || null,
         originCities: Array.isArray(r.origin_cities) ? r.origin_cities : [],
         destinationCities: Array.isArray(r.destination_cities) ? r.destination_cities : [],
