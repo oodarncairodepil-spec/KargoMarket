@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Card } from '../../components/Card'
 import { PageShell } from '../../components/PageShell'
 import { Button } from '../../components/ui/Button'
@@ -92,10 +92,6 @@ export function LoginPage() {
           </Button>
         </form>
       </Card>
-
-      <Link to="/home" className="text-center text-sm font-medium text-accent">
-        Kembali ke beranda
-      </Link>
     </PageShell>
   )
 }

@@ -20,8 +20,19 @@ Satu project untuk 3 pihak:
 4. Variabel wajib di `.env` / Vercel:
    - `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (server)
    - `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `APP_ORIGIN`
+   - Opsional: `GOOGLE_GEOCODING_API_KEY` (reverse geocoding lewat API; tanpa ini, pemilihan lokasi di peta pada form permintaan pengiriman tidak bisa mengisi kota/provinsi otomatis)
 5. `npm install`
 6. `npm run seed:server` — hanya vendor demo (bukan pengguna login).
+
+### Referensi wilayah BPS (pencarian kota/provinsi)
+
+Setelah migrasi `20260416_id_regions.sql` dan `20260417_vendors_inquiries_city_fk.sql` diterapkan pada database yang sama dengan `DATABASE_URL`:
+
+```bash
+npm run import:regions
+```
+
+Skrip mengunduh `provinces.json` dan `regencies.json` dari repo [gilang-as/indonesian-region-code](https://github.com/gilang-as/indonesian-region-code) (cabang `main`, folder `docs/json-full`). Untuk pin commit tertentu, set `INDO_REGION_JSON_BASE` ke URL `raw.githubusercontent.com/.../docs/json-full` yang diinginkan. Kolom `id_cities.id` diisi dari **kode wilayah BPS** (`code` di JSON), karena field `id` numerik pada `regencies.json` hanya unik per provinsi dan tidak boleh dipakai sebagai PK global.
 
 ## Menjalankan
 - Frontend: `npm run dev`
@@ -35,7 +46,7 @@ Default API: `http://localhost:4000`. Frontend: `VITE_API_BASE_URL` opsional (de
 
 ## Endpoint utama
 - Auth: `GET /auth/me` (Bearer)
-- Customer: `/customer/inquiries`, `/customer/inquiries/:id`, `/customer/inquiries/:id/quotes`, `/customer/inquiries/:id/select-quote`
+- Customer: `/customer/inquiries`, `/customer/inquiries/:id`, `/customer/inquiries/:id/quotes`, `/customer/inquiries/:id/select-quote`, `/customer/geocode/reverse` (reverse geocode; Bearer)
 - Admin: `/admin/inquiries`, `/admin/inquiries/:id`, `/admin/inquiries/:id/release-quotes`, `/admin/inquiries/:id/manual-quote`
 - Vendor: `/vendor/quote/:token` (GET/POST)
 

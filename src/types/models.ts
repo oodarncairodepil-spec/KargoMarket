@@ -57,6 +57,12 @@ export interface VendorRegistration {
   officePhotoName: string
   officePhotoDataUrl?: string
   officeMapsLink: string
+  /** Alamat teks dari peta (Nominatim / GPS), untuk tampilan edit. */
+  officeMapLabel?: string
+  /** FK opsional ke `id_cities` (referensi BPS). */
+  officeCityId?: string
+  /** Label tampilan dari `id_cities.full_name` bila tersedia. */
+  officeCityLabel?: string
   officeLatitude?: number
   officeLongitude?: number
   slaResponse: string
@@ -86,11 +92,16 @@ export interface Inquiry {
   pickupKecamatan?: string
   pickupKota?: string
   pickupPostalCode?: string
+  /** Dari reverse geocoding (Google), opsional */
+  pickupProvince?: string
+  pickupCityId?: string | null
   destinationAddress?: string
   destinationKelurahan?: string
   destinationKecamatan?: string
   destinationKota?: string
   destinationPostalCode?: string
+  destinationProvince?: string
+  destinationCityId?: string | null
   itemDescription: string
   /** Angka saja (mis. kg), dari input numerik */
   weight: string
@@ -175,11 +186,15 @@ export interface InquirySubmitPayload {
   pickupKecamatan: string
   pickupKota: string
   pickupPostalCode: string
+  pickupProvince?: string
   destinationAddress: string
   destinationKelurahan: string
   destinationKecamatan: string
   destinationKota: string
   destinationPostalCode: string
+  destinationProvince?: string
+  pickupCityId?: string | null
+  destinationCityId?: string | null
   itemDescription: string
   weight: string
   dimensions: string

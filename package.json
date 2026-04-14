@@ -10,7 +10,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "seed:server": "node backend/src/seed.js"
+    "seed:server": "node backend/src/seed.js",
+    "import:regions": "node scripts/import-indonesia-regions.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.0",

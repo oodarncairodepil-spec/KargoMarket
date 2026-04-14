@@ -45,11 +45,18 @@ async function request(path: string, init?: RequestInit) {
     body = null
   }
   if (!res.ok) {
-    const message =
+    const base =
       body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
         ? body.error
         : `request_failed_${res.status}`
-    throw new Error(message)
+    const googleDetail =
+      body &&
+      typeof body === 'object' &&
+      'googleErrorMessage' in body &&
+      typeof (body as { googleErrorMessage?: string }).googleErrorMessage === 'string'
+        ? ` — ${(body as { googleErrorMessage: string }).googleErrorMessage}`
+        : ''
+    throw new Error(base + googleDetail)
   }
   return body
 }

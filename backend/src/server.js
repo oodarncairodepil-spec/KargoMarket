@@ -2,9 +2,12 @@ import cors from 'cors'
 import express from 'express'
 import { z } from 'zod'
 import { requireAuth, resolveUserFromRequest } from './auth.js'
-import { config } from './config.js'
+import { config, getGoogleGeocodingApiKey } from './config.js'
 import { query } from './db.js'
 import { ensureSchema, ensureSeedVendors } from './schema.js'
+import { parseGoogleAddressComponents } from './googleGeocode.js'
+import { locationsRouter } from './locationsRouter.js'
+import { resolveMatchedCityId } from './matchCityId.js'
 import { id, normalizeArea } from './utils.js'
 
 export const app = express()
@@ -20,6 +23,7 @@ app.use(
     credentials: true,
   }),
 )
+app.use(locationsRouter)
 
 let initPromise = null
 
@@ -112,6 +116,15 @@ const adminUpdateStatusSchema = z.object({
   ]),
 })
 
+const optionalCityId = z
+  .union([z.string(), z.number(), z.null(), z.undefined()])
+  .transform((v) => {
+    if (v === undefined || v === null || v === '') return null
+    const n = typeof v === 'string' ? Number(String(v).trim()) : Number(v)
+    if (!Number.isFinite(n) || n <= 0) return null
+    return Math.trunc(n)
+  })
+
 const inquirySchema = z.object({
   pickup: z.string(),
   destination: z.string(),
@@ -120,11 +133,15 @@ const inquirySchema = z.object({
   pickupKecamatan: z.string(),
   pickupKota: z.string(),
   pickupPostalCode: z.string(),
+  pickupProvince: z.string().default(''),
+  pickupCityId: optionalCityId,
   destinationAddress: z.string(),
   destinationKelurahan: z.string(),
   destinationKecamatan: z.string(),
   destinationKota: z.string(),
   destinationPostalCode: z.string(),
+  destinationProvince: z.string().default(''),
+  destinationCityId: optionalCityId,
   itemDescription: z.string(),
   weight: z.string(),
   dimensions: z.string(),
@@ -176,6 +193,27 @@ function mapAdminInquiryListRow(r) {
   }
 }
 
+/** Daftar inquiry pelanggan — kolom ringkas (tanpa bukti bayar/base64) agar respons cepat. */
+function mapCustomerInquiryListRow(r) {
+  return {
+    id: r.id,
+    pickup: r.pickup,
+    destination: r.destination,
+    itemDescription: r.item_description,
+    itemImageUrls: r.item_image_urls || [],
+    specialRequirements: '',
+    weight: '',
+    dimensions: '',
+    status: r.status,
+    createdAt: toIso(r.created_at) ?? r.created_at,
+    selectedQuoteId: r.selected_quote_id || undefined,
+    matchedVendorIds: [],
+    quotesReleasedToCustomer: Boolean(r.quotes_released_to_customer),
+    quoteCount: Number(r.quote_count) || 0,
+    matchedVendorCount: Number(r.matched_vendor_count) || 0,
+  }
+}
+
 function mapInquiryRow(r) {
   const paidAt = r.paid_at != null ? toIso(r.paid_at) : undefined
   return {
@@ -187,11 +225,15 @@ function mapInquiryRow(r) {
     pickupKecamatan: r.pickup_kecamatan,
     pickupKota: r.pickup_kota,
     pickupPostalCode: r.pickup_postal_code,
+    pickupProvince: r.pickup_province || '',
     destinationAddress: r.destination_address,
     destinationKelurahan: r.destination_kelurahan,
     destinationKecamatan: r.destination_kecamatan,
     destinationKota: r.destination_kota,
     destinationPostalCode: r.destination_postal_code,
+    destinationProvince: r.destination_province || '',
+    pickupCityId: r.pickup_city_id != null ? String(r.pickup_city_id) : undefined,
+    destinationCityId: r.destination_city_id != null ? String(r.destination_city_id) : undefined,
     itemDescription: r.item_description,
     weight: r.weight,
     dimensions: r.dimensions,
@@ -278,18 +320,100 @@ app.get('/customer/inquiries', requireAuth(['customer']), async (req, res, next)
   try {
     const { rows } = await query(
       `
-      SELECT i.*, COALESCE(array_agg(t.vendor_id) FILTER (WHERE t.vendor_id IS NOT NULL), '{}') AS matched_vendor_ids
-             ,(SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count
-             ,(SELECT COUNT(*)::int FROM km_vendor_tokens t2 WHERE t2.inquiry_id = i.id) AS matched_vendor_count
+      SELECT
+        i.id,
+        i.pickup,
+        i.destination,
+        i.item_description,
+        i.item_image_urls,
+        i.status,
+        i.created_at,
+        i.quotes_released_to_customer,
+        i.selected_quote_id,
+        (SELECT COUNT(*)::int FROM km_quotes q WHERE q.inquiry_id = i.id) AS quote_count,
+        (SELECT COUNT(*)::int FROM km_vendor_tokens t2 WHERE t2.inquiry_id = i.id) AS matched_vendor_count
       FROM km_inquiries i
-      LEFT JOIN km_vendor_tokens t ON t.inquiry_id = i.id
       WHERE i.created_by_user_id = $1
-      GROUP BY i.id
       ORDER BY i.created_at DESC
       `,
       [req.user.id],
     )
-    res.json({ inquiries: rows.map(mapInquiryRow) })
+    res.json({ inquiries: rows.map(mapCustomerInquiryListRow) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+app.get('/customer/geocode/reverse', requireAuth(['customer']), async (req, res, next) => {
+  try {
+    const lat = Number(req.query.lat)
+    const lng = Number(req.query.lng)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ error: 'invalid_coordinates' })
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({ error: 'invalid_coordinates' })
+    }
+    const key = getGoogleGeocodingApiKey()
+    if (!key) {
+      console.warn(
+        '[geocode/reverse] GOOGLE_GEOCODING_API_KEY kosong. Cek .env di root project, lalu restart server. cwd=',
+        process.cwd(),
+      )
+      return res.status(503).json({ error: 'geocoding_unconfigured' })
+    }
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(`${lat},${lng}`)}&key=${encodeURIComponent(key)}`
+    const ac = new AbortController()
+    const t = setTimeout(() => ac.abort(), 8000)
+    let data
+    try {
+      const r = await fetch(url, { signal: ac.signal })
+      data = await r.json()
+    } finally {
+      clearTimeout(t)
+    }
+    if (!data || typeof data !== 'object') {
+      return res.status(502).json({ error: 'geocode_bad_response' })
+    }
+    if (data.status !== 'OK' || !data.results?.[0]) {
+      const googleErr =
+        typeof data.error_message === 'string' && data.error_message.trim()
+          ? data.error_message.trim().slice(0, 300)
+          : undefined
+      console.warn('[geocode/reverse] Google status:', data.status, googleErr || '')
+      return res.status(422).json({
+        error: 'geocode_no_results',
+        googleStatus: data.status,
+        googleErrorMessage: googleErr,
+      })
+    }
+    const first = data.results[0]
+    const formatted = first.formatted_address || ''
+    const parsed = parseGoogleAddressComponents(first.address_components || [], formatted)
+    let matchedCityId = null
+    let matchedCityLabel = null
+    try {
+      const m = await resolveMatchedCityId(parsed.city, parsed.province)
+      if (m) {
+        matchedCityId = m.id
+        matchedCityLabel = m.label
+      }
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : ''
+      if (code !== '42P01') {
+        console.warn('[geocode/reverse] resolveMatchedCityId:', err instanceof Error ? err.message : String(err))
+      }
+    }
+    res.json({
+      city: parsed.city,
+      province: parsed.province,
+      postalCode: parsed.postalCode,
+      kelurahan: parsed.kelurahan,
+      kecamatan: parsed.kecamatan,
+      formattedAddress: formatted,
+      matchedCityId,
+      matchedCityLabel,
+    })
   } catch (err) {
     next(err)
   }
@@ -306,13 +430,13 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
       `
       INSERT INTO km_inquiries (
         id, created_by_user_id, pickup, destination, pickup_address, pickup_kelurahan, pickup_kecamatan,
-        pickup_kota, pickup_postal_code, destination_address, destination_kelurahan, destination_kecamatan,
-        destination_kota, destination_postal_code, item_description, weight, dimensions, length_cm, width_cm,
+        pickup_kota, pickup_postal_code, pickup_province, pickup_city_id, destination_address, destination_kelurahan, destination_kecamatan,
+        destination_kota, destination_postal_code, destination_province, destination_city_id, item_description, weight, dimensions, length_cm, width_cm,
         height_cm, item_image_urls, special_requirements, scheduled_pickup_date, koli_count, estimated_item_value,
         vehicle_type, special_treatment, insurance, additional_packing, budget_estimate, tnc_accepted_at,
         status, quotes_released_to_customer
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,'awaiting_quotes',FALSE
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,'awaiting_quotes',FALSE
       )
       `,
       [
@@ -325,11 +449,15 @@ app.post('/customer/inquiries', requireTrustedOrigin, requireAuth(['customer']),
         payload.pickupKecamatan,
         payload.pickupKota,
         payload.pickupPostalCode,
+        payload.pickupProvince,
+        payload.pickupCityId,
         payload.destinationAddress,
         payload.destinationKelurahan,
         payload.destinationKecamatan,
         payload.destinationKota,
         payload.destinationPostalCode,
+        payload.destinationProvince,
+        payload.destinationCityId,
         payload.itemDescription,
         payload.weight,
         payload.dimensions,
@@ -617,7 +745,13 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
     const quoteRows = await query(`SELECT * FROM km_quotes WHERE inquiry_id = $1 ORDER BY submitted_at DESC`, [req.params.id])
     const tokenRows = await query(
       `
-      SELECT t.token, t.vendor_id, v.name AS vendor_name
+      SELECT
+        t.token,
+        t.vendor_id,
+        v.name AS vendor_name,
+        COALESCE(v.origin_cities, '{}'::text[]) AS origin_cities,
+        COALESCE(v.destination_cities, '{}'::text[]) AS destination_cities,
+        COALESCE(v.service_areas, '{}'::text[]) AS service_areas
       FROM km_vendor_tokens t
       LEFT JOIN vendors v ON v.id = t.vendor_id
       WHERE t.inquiry_id = $1
@@ -630,7 +764,14 @@ app.get('/admin/inquiries/:id', requireAuth(['admin']), async (req, res, next) =
         customerName: rows[0].customer_name,
       },
       quotes: quoteRows.rows.map(mapQuoteRow),
-      tokens: tokenRows.rows.map((r) => ({ token: r.token, vendorId: r.vendor_id, vendorName: r.vendor_name || null })),
+      tokens: tokenRows.rows.map((r) => ({
+        token: r.token,
+        vendorId: r.vendor_id,
+        vendorName: r.vendor_name || null,
+        originCities: Array.isArray(r.origin_cities) ? r.origin_cities : [],
+        destinationCities: Array.isArray(r.destination_cities) ? r.destination_cities : [],
+        serviceAreas: Array.isArray(r.service_areas) ? r.service_areas : [],
+      })),
     })
   } catch (err) {
     next(err)

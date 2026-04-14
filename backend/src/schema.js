@@ -157,6 +157,16 @@ export async function ensureSchema() {
   await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS payment_proof_file_name TEXT`)
   await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS payment_proof_data_url TEXT`)
   await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS pickup_province TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS destination_province TEXT NOT NULL DEFAULT ''`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS pickup_city_id BIGINT`)
+  await query(`ALTER TABLE km_inquiries ADD COLUMN IF NOT EXISTS destination_city_id BIGINT`)
+  await query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS origin_cities TEXT[] NOT NULL DEFAULT '{}'::text[]`)
+  await query(
+    `ALTER TABLE vendors ADD COLUMN IF NOT EXISTS destination_cities TEXT[] NOT NULL DEFAULT '{}'::text[]`,
+  )
+  await query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS office_city_id BIGINT`)
+  await query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS office_map_label TEXT`)
 
   await query(`
     CREATE TABLE IF NOT EXISTS km_vendor_tokens (

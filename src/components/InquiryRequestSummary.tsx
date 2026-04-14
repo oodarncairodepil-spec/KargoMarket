@@ -13,28 +13,21 @@ function AddressDetail({
   kel,
   kec,
   kota,
-  kode,
 }: {
   label: string
   address?: string
   kel?: string
   kec?: string
   kota?: string
-  kode?: string
 }) {
   const areaLine = [kel, kec, kota].filter((x) => x?.trim()).join(', ')
-  const hasContent = address?.trim() || areaLine || kode?.trim()
+  const hasContent = address?.trim() || areaLine
   if (!hasContent) return null
   return (
     <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-3">
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
       {address?.trim() && <p className="mt-1 text-sm text-slate-800">{address.trim()}</p>}
-      {(areaLine || kode?.trim()) && (
-        <p className="mt-1 text-sm text-slate-600">
-          {areaLine}
-          {kode?.trim() ? `${areaLine ? ' · ' : ''}Kode pos ${kode.trim()}` : ''}
-        </p>
-      )}
+      {areaLine && <p className="mt-1 text-sm text-slate-600">{areaLine}</p>}
     </div>
   )
 }
@@ -74,7 +67,6 @@ export function InquiryRequestSummary({
             kel={inquiry.pickupKelurahan}
             kec={inquiry.pickupKecamatan}
             kota={inquiry.pickupKota}
-            kode={inquiry.pickupPostalCode}
           />
           <AddressDetail
             label="Tujuan pengiriman"
@@ -82,7 +74,6 @@ export function InquiryRequestSummary({
             kel={inquiry.destinationKelurahan}
             kec={inquiry.destinationKecamatan}
             kota={inquiry.destinationKota}
-            kode={inquiry.destinationPostalCode}
           />
         </div>
       )}

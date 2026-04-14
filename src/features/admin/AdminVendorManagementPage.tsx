@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card } from '../../components/Card'
+import { RegionMultiAutocomplete } from '../../components/RegionMultiAutocomplete'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 import { Spinner } from '../../components/ui/Spinner'
@@ -11,6 +12,10 @@ import { isDisplayableImageUrl, uploadUserFile } from '../../lib/storageUpload'
 import type { VehicleType, VendorRegistration } from '../../types/models'
 
 const inputClass = `mt-1 ${ui.form.input.compact}`
+
+function looksLikeHttpUrl(s: string): boolean {
+  return /^https?:\/\//i.test(s.trim())
+}
 const businessTypes = ['CV', 'PT', 'Perorangan'] as const
 const serviceTypeOptions = ['Trucking', 'Cold Chain', 'Project Cargo', 'Last Mile', 'Intercity'] as const
 const specializationOptions = ['Alat Berat', 'FMCG', 'Frozen Food', 'Fragile', 'Retail', 'Project Cargo', 'Remote Area'] as const
@@ -32,7 +37,7 @@ type VendorFilters = {
 
 /** Tanpa kolom base64 / JSON berat — muat daftar jauh lebih cepat. Detail penuh diambil saat edit. */
 const VENDOR_LIST_COLUMNS =
-  'id,name,business_type,established_year,origin_cities,destination_cities,pic_name,whatsapp_number,email,owner_name,owner_identity_proof_name,service_types,specializations,vehicle_types,max_capacity,operational_days,operational_hours,pricing_scheme,pricing_method,supports_bidding,legal_nib_name,npwp_name,office_photo_name,office_maps_link,office_latitude,office_longitude,sla_response,insurance_terms,packing_fee_terms,other_fees_terms,payment_terms,tax_terms,tnc_accepted,is_active,created_at'
+  'id,name,business_type,established_year,origin_cities,destination_cities,pic_name,whatsapp_number,email,owner_name,owner_identity_proof_name,service_types,specializations,vehicle_types,max_capacity,operational_days,operational_hours,pricing_scheme,pricing_method,supports_bidding,legal_nib_name,npwp_name,office_photo_name,office_maps_link,office_latitude,office_longitude,office_map_label,office_city_id,sla_response,insurance_terms,packing_fee_terms,other_fees_terms,payment_terms,tax_terms,tnc_accepted,is_active,created_at'
 
 const VENDOR_PAGE_SIZE = 10
 
@@ -88,6 +93,9 @@ function mapVendorRowToRegistration(row: Record<string, unknown>): VendorRegistr
     officePhotoName: (row.office_photo_name as string) || '',
     officePhotoDataUrl: (row.office_photo_data_url as string) || undefined,
     officeMapsLink: (row.office_maps_link as string) || '',
+    officeMapLabel: (row.office_map_label as string) || undefined,
+    officeCityId: row.office_city_id != null ? String(row.office_city_id) : undefined,
+    officeCityLabel: undefined,
     officeLatitude: row.office_latitude != null ? Number(row.office_latitude) : undefined,
     officeLongitude: row.office_longitude != null ? Number(row.office_longitude) : undefined,
     slaResponse: (row.sla_response as string) || '',
@@ -129,12 +137,6 @@ type InvalidField =
   | 'tncAccepted'
   | 'pricingScheme'
   | 'pricingMethod'
-
-interface MapSuggestion {
-  display_name: string
-  lat: string
-  lon: string
-}
 
 function CompactMultiSelect({
   options,
@@ -240,7 +242,8 @@ export function AdminVendorManagementPage() {
   const npwpRef = useRef<HTMLInputElement>(null)
   const fleetRef = useRef<HTMLInputElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
-  const officeLocationContainerRef = useRef<HTMLDivElement>(null)
+  /** Pertahankan office_city_id saat edit tanpa UI BPS (jangan kirim null di upsert). */
+  const preservedOfficeCityIdRef = useRef<string | null>(null)
 
   const [view, setView] = useState<'list' | 'form'>('list')
   const [vendorRegistrations, setVendorRegistrations] = useState<VendorRegistration[]>([])
@@ -295,10 +298,10 @@ export function AdminVendorManagementPage() {
   const [officePhotoDataUrl, setOfficePhotoDataUrl] = useState<string | undefined>(undefined)
   const [officeMapsLink, setOfficeMapsLink] = useState('')
   const [officeLocationSearch, setOfficeLocationSearch] = useState('')
-  const [locationSuggestions, setLocationSuggestions] = useState<MapSuggestion[]>([])
-  const [locationLoading, setLocationLoading] = useState(false)
   const [officeLatitude, setOfficeLatitude] = useState('')
   const [officeLongitude, setOfficeLongitude] = useState('')
+  /** Nama tempat yang jelas (Nominatim / GPS / label tersimpan), terpisah dari kolom cari. */
+  const [officeMapPlaceLabel, setOfficeMapPlaceLabel] = useState('')
   const [locating, setLocating] = useState(false)
   const [slaResponse, setSlaResponse] = useState('')
   const [insuranceTerms, setInsuranceTerms] = useState('')
@@ -450,15 +453,6 @@ export function AdminVendorManagementPage() {
     return () => ob.disconnect()
   }, [view, loadMoreVendors, vendorRegistrations.length, vendorHasMore])
 
-  useOnClickOutside(
-    officeLocationContainerRef,
-    () => {
-      setLocationSuggestions([])
-      setLocationLoading(false)
-    },
-    locationLoading || locationSuggestions.length > 0,
-  )
-
   function fieldClass(key: InvalidField): string {
     return invalidField === key
       ? `${inputClass} border-red-500 ring-2 ring-red-100 focus:border-red-500 focus:ring-red-100`
@@ -539,7 +533,7 @@ export function AdminVendorManagementPage() {
         setOfficeLongitude(lng.toFixed(6))
         setOfficeMapsLink(`https://maps.google.com/?q=${lat},${lng}`)
         setOfficeLocationSearch(`${lat.toFixed(6)}, ${lng.toFixed(6)}`)
-        setLocationSuggestions([])
+        setOfficeMapPlaceLabel('Lokasi dari GPS (perangkat)')
         setError('')
         setLocating(false)
       },
@@ -612,8 +606,9 @@ export function AdminVendorManagementPage() {
     setOfficePhotoName('')
     setOfficePhotoDataUrl(undefined)
     setOfficeMapsLink('')
+    setOfficeMapPlaceLabel('')
+    preservedOfficeCityIdRef.current = null
     setOfficeLocationSearch('')
-    setLocationSuggestions([])
     setOfficeLatitude('')
     setOfficeLongitude('')
     setSlaResponse('')
@@ -668,9 +663,24 @@ export function AdminVendorManagementPage() {
     setOfficePhotoName(v.officePhotoName || '')
     setOfficePhotoDataUrl(v.officePhotoDataUrl)
     setOfficeMapsLink(v.officeMapsLink || '')
-    setOfficeLocationSearch(v.officeMapsLink || '')
-    setOfficeLatitude(v.officeLatitude != null ? String(v.officeLatitude) : '')
-    setOfficeLongitude(v.officeLongitude != null ? String(v.officeLongitude) : '')
+    preservedOfficeCityIdRef.current = v.officeCityId ?? null
+    const latStr = v.officeLatitude != null ? String(v.officeLatitude) : ''
+    const lngStr = v.officeLongitude != null ? String(v.officeLongitude) : ''
+    setOfficeLatitude(latStr)
+    setOfficeLongitude(lngStr)
+    const linkTrim = (v.officeMapsLink || '').trim()
+    const savedMapLabel = (v.officeMapLabel || '').trim()
+    if (latStr && lngStr) {
+      const lf = Number(latStr).toFixed(6)
+      const lg = Number(lngStr).toFixed(6)
+      setOfficeLocationSearch(savedMapLabel || `${lf}, ${lg}`)
+      setOfficeMapPlaceLabel(
+        savedMapLabel || (looksLikeHttpUrl(linkTrim) ? '' : linkTrim || ''),
+      )
+    } else {
+      setOfficeLocationSearch(savedMapLabel || (looksLikeHttpUrl(linkTrim) ? '' : linkTrim))
+      setOfficeMapPlaceLabel(savedMapLabel || '')
+    }
     setSlaResponse(v.slaResponse || '')
     setInsuranceTerms(v.insuranceTerms || '')
     setPackingFeeTerms(v.packingFeeTerms || '')
@@ -694,7 +704,9 @@ export function AdminVendorManagementPage() {
         setError(loadError?.message || 'Vendor tidak ditemukan.')
         return
       }
-      loadFormForEdit(mapVendorRowToRegistration(data as Record<string, unknown>))
+      const row = data as Record<string, unknown>
+      const mapped = mapVendorRowToRegistration(row)
+      loadFormForEdit(mapped)
     } finally {
       setDetailLoading(false)
     }
@@ -764,6 +776,8 @@ export function AdminVendorManagementPage() {
       office_maps_link: officeMapsLink.trim(),
       office_latitude: officeLatitude ? Number(officeLatitude) : null,
       office_longitude: officeLongitude ? Number(officeLongitude) : null,
+      office_map_label: officeMapPlaceLabel.trim() || null,
+      office_city_id: preservedOfficeCityIdRef.current ? Number(preservedOfficeCityIdRef.current) : null,
       sla_response: slaResponse.trim(),
       insurance_terms: insuranceTerms.trim(),
       packing_fee_terms: packingFeeTerms.trim(),
@@ -801,29 +815,6 @@ export function AdminVendorManagementPage() {
     }
   }
 
-  useEffect(() => {
-    const q = officeLocationSearch.trim()
-    if (q.length < 3) {
-      setLocationSuggestions([])
-      return
-    }
-    const timer = setTimeout(async () => {
-      try {
-        setLocationLoading(true)
-        const res = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`,
-        )
-        const data = (await res.json()) as MapSuggestion[]
-        setLocationSuggestions(Array.isArray(data) ? data : [])
-      } catch {
-        setLocationSuggestions([])
-      } finally {
-        setLocationLoading(false)
-      }
-    }, 350)
-    return () => clearTimeout(timer)
-  }, [officeLocationSearch])
-
   if (view === 'list') {
     const searchActive = vendorSearchDebounced.trim().length > 0
     const activeFilterCount = Object.values(vendorFilters).reduce(
@@ -832,7 +823,7 @@ export function AdminVendorManagementPage() {
     )
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3">
           <div className="min-w-0 flex-1">
             <label className="block text-xs font-medium text-slate-600">Cari vendor</label>
             <div className="mt-1 flex items-center gap-2">
@@ -865,18 +856,11 @@ export function AdminVendorManagementPage() {
                 )}
               </button>
             </div>
-            {!listLoading && (
-              <p className="mt-2 text-sm font-medium text-slate-700">
-                {vendorTotalCount != null
-                  ? `Menampilkan ${vendorRegistrations.length} dari ${vendorTotalCount} vendor${searchActive ? ' (hasil pencarian)' : ''}`
-                  : `Dimuat: ${vendorRegistrations.length} vendor`}
-                {vendorHasMore ? ' · Gulir ke bawah untuk memuat lebih banyak' : ''}
-              </p>
-            )}
           </div>
           <Button
             type="button"
             size="sm"
+            fullWidth
             disabled={detailLoading}
             onClick={() => {
               resetForm()
@@ -886,6 +870,14 @@ export function AdminVendorManagementPage() {
             Tambah
           </Button>
         </div>
+        {!listLoading && (
+          <p className="text-sm font-medium text-slate-700">
+            {vendorTotalCount != null
+              ? `Menampilkan ${vendorRegistrations.length} dari ${vendorTotalCount} vendor${searchActive ? ' (hasil pencarian)' : ''}`
+              : `Dimuat: ${vendorRegistrations.length} vendor`}
+            {vendorHasMore ? ' · Gulir ke bawah untuk memuat lebih banyak' : ''}
+          </p>
+        )}
         {filterModalOpen && (
           <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/30 px-4 pb-4 sm:items-center">
             <div className="w-full max-w-lg rounded-2xl bg-white p-4 shadow-xl">
@@ -1042,12 +1034,32 @@ export function AdminVendorManagementPage() {
             <input className={inputClass} inputMode="numeric" value={establishedYear} onChange={(e) => setEstablishedYear(e.target.value.replace(/\D/g, '').slice(0, 4))} />
           </label>
           <div className="mt-3" data-field="originCities" tabIndex={-1}>
-            <p className="text-sm font-medium text-slate-700">Kota Asal (Origin)</p>
-            <CompactMultiSelect options={cityOptions} selected={originCities} onToggle={(city) => { toggle(setOriginCities, city); clearInvalid('originCities') }} placeholder="Pilih kota asal" hasError={invalidField === 'originCities'} onInteract={() => clearInvalid('originCities')} />
+            <RegionMultiAutocomplete
+              label="Kota Asal (Origin)"
+              selected={originCities}
+              onChange={setOriginCities}
+              inputClassName={inputClass}
+              hasError={invalidField === 'originCities'}
+              disabled={saveSubmitting}
+              onInteract={() => clearInvalid('originCities')}
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Cari beberapa kota/kab (referensi BPS), pilih dari daftar untuk menambah.
+            </p>
           </div>
           <div className="mt-3" data-field="destinationCities" tabIndex={-1}>
-            <p className="text-sm font-medium text-slate-700">Kota Tujuan (Destination)</p>
-            <CompactMultiSelect options={cityOptions} selected={destinationCities} onToggle={(city) => { toggle(setDestinationCities, city); clearInvalid('destinationCities') }} placeholder="Pilih kota tujuan" hasError={invalidField === 'destinationCities'} onInteract={() => clearInvalid('destinationCities')} />
+            <RegionMultiAutocomplete
+              label="Kota Tujuan (Destination)"
+              selected={destinationCities}
+              onChange={setDestinationCities}
+              inputClassName={inputClass}
+              hasError={invalidField === 'destinationCities'}
+              disabled={saveSubmitting}
+              onInteract={() => clearInvalid('destinationCities')}
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Sama seperti asal: pencarian multi-kota dari master wilayah.
+            </p>
           </div>
         </Card>
 
@@ -1371,54 +1383,74 @@ export function AdminVendorManagementPage() {
               {officePhotoName || 'Upload foto kantor'}
             </Button>
           </div>
-          <label className="mt-3 block text-sm font-medium text-slate-700">
-            Lokasi Kantor (Maps)
-            <div ref={officeLocationContainerRef} className="mt-1">
+          <div className="mt-3">
+            <p className="text-sm font-medium text-slate-700">Lokasi Kantor (Maps)</p>
+            {officeLatitude.trim() && officeLongitude.trim() ? (
+              <div className="mt-1 space-y-1.5 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                <p className="font-semibold text-slate-600">Alamat terpilih</p>
+                <p className="text-slate-900">
+                  {officeMapPlaceLabel.trim() ||
+                    (!looksLikeHttpUrl(officeLocationSearch) && officeLocationSearch.trim()) ||
+                    `Koordinat: ${officeLatitude.trim()}, ${officeLongitude.trim()}`}
+                </p>
+                {looksLikeHttpUrl(officeMapsLink) ? (
+                  <a
+                    href={officeMapsLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-block font-medium text-accent underline"
+                  >
+                    Buka di Google Maps
+                  </a>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="mt-1">
+              <label htmlFor="office-maps-search" className="sr-only">
+                Cari alamat kantor di peta
+              </label>
               <div className="relative">
-                <input data-field="officeMapsLink" className={fieldClass('officeMapsLink')} value={officeLocationSearch} onChange={(e) => { const val = e.target.value; setOfficeLocationSearch(val); setOfficeMapsLink(val); clearInvalid('officeMapsLink') }} placeholder="Cari alamat/lokasi kantor..." />
-                <button type="button" onClick={pickCurrentLocation} disabled={locating} aria-label="Deteksi lokasi saat ini" className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-accent disabled:opacity-50">
+                <input
+                  id="office-maps-search"
+                  data-field="officeMapsLink"
+                  className={fieldClass('officeMapsLink')}
+                  value={officeLocationSearch}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    setOfficeLocationSearch(val)
+                    setOfficeMapsLink(val)
+                    setOfficeMapPlaceLabel('')
+                    clearInvalid('officeMapsLink')
+                  }}
+                  placeholder="Cari alamat/lokasi kantor..."
+                />
+                <button
+                  type="button"
+                  onClick={pickCurrentLocation}
+                  disabled={locating}
+                  aria-label="Deteksi lokasi saat ini"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-accent disabled:opacity-50"
+                >
                   <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none">
-                    <path d="M12 2a7 7 0 0 0-7 7c0 5.3 7 13 7 13s7-7.7 7-13a7 7 0 0 0-7-7Z" stroke="currentColor" strokeWidth="2" />
+                    <path
+                      d="M12 2a7 7 0 0 0-7 7c0 5.3 7 13 7 13s7-7.7 7-13a7 7 0 0 0-7-7Z"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    />
                     <circle cx="12" cy="9" r="2.5" stroke="currentColor" strokeWidth="2" />
                   </svg>
                 </button>
               </div>
-              {(locationLoading || locationSuggestions.length > 0) && (
-                <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                  {locationLoading && <p className="px-3 py-2 text-xs text-slate-500">Mencari lokasi...</p>}
-                  {!locationLoading && locationSuggestions.length > 0 && (
-                    <ul className="max-h-44 overflow-auto">
-                      {locationSuggestions.map((s, idx) => (
-                        <li key={`${s.lat}-${s.lon}-${idx}`}>
-                          <button
-                            type="button"
-                            className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
-                            onClick={() => {
-                              setOfficeLocationSearch(s.display_name)
-                              setOfficeLatitude(Number(s.lat).toFixed(6))
-                              setOfficeLongitude(Number(s.lon).toFixed(6))
-                              setOfficeMapsLink(`https://maps.google.com/?q=${s.lat},${s.lon}`)
-                              setLocationSuggestions([])
-                              clearInvalid('officeMapsLink')
-                            }}
-                          >
-                            {s.display_name}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
             </div>
-          </label>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <label className="text-xs font-medium text-slate-600">Latitude<input className={inputClass} value={officeLatitude} onChange={(e) => setOfficeLatitude(e.target.value)} placeholder="-6.200000" /></label>
-            <label className="text-xs font-medium text-slate-600">Longitude<input className={inputClass} value={officeLongitude} onChange={(e) => setOfficeLongitude(e.target.value)} placeholder="106.816666" /></label>
           </div>
           {(officeMapsLink || (officeLatitude && officeLongitude)) && (
             <div className="mt-2 overflow-hidden rounded-lg border border-slate-200">
-              <iframe title="Pratinjau peta lokasi kantor" src={`https://maps.google.com/maps?q=${encodeURIComponent(officeLatitude && officeLongitude ? `${officeLatitude},${officeLongitude}` : officeMapsLink)}&z=14&output=embed`} className="h-44 w-full" loading="lazy" />
+              <iframe
+                title="Pratinjau peta lokasi kantor"
+                src={`https://maps.google.com/maps?q=${encodeURIComponent(officeLatitude && officeLongitude ? `${officeLatitude},${officeLongitude}` : officeMapsLink)}&z=14&output=embed`}
+                className="h-44 w-full"
+                loading="lazy"
+              />
             </div>
           )}
         </Card>

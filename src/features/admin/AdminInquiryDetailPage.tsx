@@ -15,16 +15,34 @@ import { inquiryStatusBadgeVariant, inquiryStatusLabel } from '../../lib/inquiry
 import { VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
 import { getVendorById } from '../../lib/matchVendors'
 import { uploadUserFile } from '../../lib/storageUpload'
+import { supabase } from '../../lib/supabase'
 import type { Inquiry, QuoteSubmitPayload, VehicleType, VendorQuote } from '../../types/models'
 
 const inputClass = `mt-1 ${ui.form.input.compact}`
 
 type AdminInquiryDetail = Inquiry & { customerName?: string }
 
+type VendorTokenInfo = {
+  token: string
+  vendorId: string
+  vendorName?: string | null
+  originCities?: string[]
+  destinationCities?: string[]
+  serviceAreas?: string[]
+}
+
+type RouteVendorProfile = {
+  id: string
+  name: string
+  originCities: string[]
+  destinationCities: string[]
+  serviceAreas: string[]
+}
+
 type AdminDetailResponse = {
   inquiry?: AdminInquiryDetail
   quotes?: VendorQuote[]
-  tokens?: { token: string; vendorId: string; vendorName?: string | null }[]
+  tokens?: VendorTokenInfo[]
 }
 
 function vendorQuoteUrl(token: string) {
@@ -41,11 +59,88 @@ type VendorQuoteFilter =
   | typeof VENDOR_QUOTE_FILTER_RESPONDED
   | typeof VENDOR_QUOTE_FILTER_PENDING
 
+const INQUIRY_STATUSES: Inquiry['status'][] = [
+  'awaiting_quotes',
+  'quotes_ready',
+  'vendor_selected',
+  'awaiting_payment',
+  'paid',
+  'payment_confirmed',
+  'in_transit',
+  'cancelled',
+  'completed',
+]
+
+function normalizeArea(value: string | null | undefined): string {
+  return (value || '').trim().toLowerCase()
+}
+
+function routeAreaCandidates(inquiry: AdminInquiryDetail, kind: 'origin' | 'destination'): string[] {
+  const values =
+    kind === 'origin'
+      ? [inquiry.pickup, inquiry.pickupKota, inquiry.pickupProvince]
+      : [inquiry.destination, inquiry.destinationKota, inquiry.destinationProvince]
+  return values.map(normalizeArea).filter(Boolean)
+}
+
+function listMatchesRoute(list: string[], candidates: string[]): boolean {
+  const normalized = list.map(normalizeArea).filter(Boolean)
+  if (normalized.length === 0) return false
+  if (candidates.length === 0) return true
+  return normalized.some((item) =>
+    candidates.some((candidate) => {
+      if (candidate.includes(item) || item.includes(candidate)) return true
+      const itemParts = item
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean)
+      return itemParts.some((part) => candidate.includes(part) || part.includes(candidate))
+    }),
+  )
+}
+
+function supportsNationalCoverage(list: string[]): boolean {
+  const normalized = list.map(normalizeArea)
+  return normalized.some(
+    (entry) => entry.includes('indonesia') || entry.includes('nasional') || entry.includes('lintas pulau'),
+  )
+}
+
+type VendorRouteCoverage = {
+  originCities?: string[]
+  destinationCities?: string[]
+  serviceAreas?: string[]
+}
+
+function vendorSupportsRoute(vendorId: string, inquiry: AdminInquiryDetail, profile?: VendorRouteCoverage): boolean {
+  const originCandidates = routeAreaCandidates(inquiry, 'origin')
+  const destinationCandidates = routeAreaCandidates(inquiry, 'destination')
+
+  const originCities = Array.isArray(profile?.originCities) ? profile.originCities : []
+  const destinationCities = Array.isArray(profile?.destinationCities) ? profile.destinationCities : []
+  const hasStructuredCoverage = originCities.length > 0 || destinationCities.length > 0
+
+  if (hasStructuredCoverage) {
+    const originOk = originCities.length === 0 ? true : listMatchesRoute(originCities, originCandidates)
+    const destinationOk =
+      destinationCities.length === 0 ? true : listMatchesRoute(destinationCities, destinationCandidates)
+    return originOk && destinationOk
+  }
+
+  const fallbackAreas = Array.isArray(profile?.serviceAreas) ? profile.serviceAreas : []
+  const fallbackVendor = getVendorById(vendorId)
+  const areas =
+    fallbackAreas.length > 0 ? fallbackAreas : fallbackVendor?.serviceAreas ? [...fallbackVendor.serviceAreas] : []
+  if (areas.length === 0) return false
+  if (supportsNationalCoverage(areas)) return true
+  return listMatchesRoute(areas, originCandidates) && listMatchesRoute(areas, destinationCandidates)
+}
+
 export function AdminInquiryDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [inquiry, setInquiry] = useState<AdminInquiryDetail | null>(null)
   const [quotes, setQuotes] = useState<VendorQuote[]>([])
-  const [tokens, setTokens] = useState<{ token: string; vendorId: string; vendorName?: string | null }[]>([])
+  const [tokens, setTokens] = useState<VendorTokenInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
@@ -65,6 +160,7 @@ export function AdminInquiryDetailPage() {
   const [vendorNameQuery, setVendorNameQuery] = useState('')
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [paymentConfirmUploading, setPaymentConfirmUploading] = useState(false)
+  const [routeVendors, setRouteVendors] = useState<RouteVendorProfile[]>([])
 
   const loadDetail = useCallback(async () => {
     if (!id) return
@@ -131,10 +227,45 @@ export function AdminInquiryDetailPage() {
     }
     return map
   }, [tokens])
+  const tokenProfileByVendor = useMemo(() => {
+    const map = new Map<string, VendorTokenInfo>()
+    for (const t of tokens) {
+      map.set(t.vendorId, t)
+    }
+    return map
+  }, [tokens])
+  const routeVendorProfileById = useMemo(() => {
+    const map = new Map<string, RouteVendorProfile>()
+    for (const v of routeVendors) map.set(v.id, v)
+    return map
+  }, [routeVendors])
+  const routeVendorNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const v of routeVendors) {
+      const n = v.name.trim()
+      if (n) map.set(v.id, n)
+    }
+    return map
+  }, [routeVendors])
+
+  const routeSupportedVendorIds = useMemo(() => {
+    if (!inquiry) return []
+    const candidateIds =
+      routeVendors.length > 0
+        ? routeVendors.map((v) => v.id)
+        : inquiry.matchedVendorIds
+    return candidateIds.filter((vendorId) =>
+      vendorSupportsRoute(
+        vendorId,
+        inquiry,
+        tokenProfileByVendor.get(vendorId) ?? routeVendorProfileById.get(vendorId),
+      ),
+    )
+  }, [inquiry, routeVendorProfileById, routeVendors, tokenProfileByVendor])
 
   const filteredMatchedVendorIds = useMemo(() => {
     if (!inquiry) return []
-    let ids = [...inquiry.matchedVendorIds]
+    let ids = [...routeSupportedVendorIds]
     if (vendorQuoteFilter === VENDOR_QUOTE_FILTER_RESPONDED) {
       ids = ids.filter((vid) => quotes.some((q) => q.vendorId === vid))
     } else if (vendorQuoteFilter === VENDOR_QUOTE_FILTER_PENDING) {
@@ -143,12 +274,49 @@ export function AdminInquiryDetailPage() {
     const q = vendorNameQuery.trim().toLowerCase()
     if (q) {
       ids = ids.filter((vid) => {
-        const v = getVendorById(vid)
-        return (v?.name ?? vid).toLowerCase().includes(q)
+        const resolvedName =
+          tokenNameByVendor.get(vid) || routeVendorNameById.get(vid) || getVendorById(vid)?.name || vid
+        return resolvedName.toLowerCase().includes(q)
       })
     }
     return ids
-  }, [inquiry, quotes, vendorQuoteFilter, vendorNameQuery])
+  }, [
+    inquiry,
+    quotes,
+    routeSupportedVendorIds,
+    routeVendorNameById,
+    tokenNameByVendor,
+    vendorQuoteFilter,
+    vendorNameQuery,
+  ])
+
+  useEffect(() => {
+    if (!inquiry) {
+      setRouteVendors([])
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      const { data, error } = await supabase
+        .from('vendors')
+        .select('id,name,origin_cities,destination_cities,service_areas,is_active')
+        .eq('is_active', true)
+      if (cancelled || error) return
+      const mapped = (Array.isArray(data) ? data : [])
+        .filter((row) => row && typeof row.id === 'string')
+        .map((row) => ({
+          id: row.id as string,
+          name: typeof row.name === 'string' ? row.name : row.id,
+          originCities: Array.isArray(row.origin_cities) ? (row.origin_cities as string[]) : [],
+          destinationCities: Array.isArray(row.destination_cities) ? (row.destination_cities as string[]) : [],
+          serviceAreas: Array.isArray(row.service_areas) ? (row.service_areas as string[]) : [],
+        }))
+      if (!cancelled) setRouteVendors(mapped)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [inquiry])
 
   useEffect(() => {
     return () => {
@@ -363,20 +531,21 @@ export function AdminInquiryDetailPage() {
       <SectionCard className="text-left">
         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Status proses</p>
         <p className="mt-1 text-sm text-slate-700">{inquiryStatusLabel(inquiry.status)}</p>
-        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {(['awaiting_quotes','awaiting_payment','paid','payment_confirmed','in_transit','cancelled','completed'] as Inquiry['status'][]).map((s) => (
-            <Button
-              key={s}
-              type="button"
-              size="sm"
-              variant={inquiry.status === s ? 'neutralDark' : 'secondary'}
-              disabled={statusUpdating}
-              onClick={() => void updateInquiryStatus(s)}
-            >
-              {inquiryStatusLabel(s)}
-            </Button>
-          ))}
-        </div>
+        <label className="mt-3 block">
+          <span className="text-xs font-medium text-slate-600">Ubah status</span>
+          <select
+            className={inputClass}
+            disabled={statusUpdating}
+            value={inquiry.status}
+            onChange={(e) => void updateInquiryStatus(e.target.value as Inquiry['status'])}
+          >
+            {INQUIRY_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {inquiryStatusLabel(s)}
+              </option>
+            ))}
+          </select>
+        </label>
       </SectionCard>
 
       {inquiry.payment?.proofDataUrl && (
@@ -422,6 +591,9 @@ export function AdminInquiryDetailPage() {
         <h2 className="text-left text-sm font-semibold uppercase tracking-wide text-slate-500">
           Vendor & penawaran
         </h2>
+        <span className="text-xs text-slate-500">
+          {filteredMatchedVendorIds.length} vendor mendukung rute {inquiry.pickup} → {inquiry.destination}
+        </span>
         <button
           type="button"
           aria-label="Muat ulang daftar vendor dan penawaran"
@@ -479,7 +651,7 @@ export function AdminInquiryDetailPage() {
       <div className="flex flex-col gap-3">
         {filteredMatchedVendorIds.map((vid) => {
           const vendor = getVendorById(vid)
-          const name = tokenNameByVendor.get(vid) || vendor?.name || vid
+          const name = tokenNameByVendor.get(vid) || routeVendorNameById.get(vid) || vendor?.name || vid
           const token = tokensByVendor.get(vid)
           const quote = quotes.find((q) => q.vendorId === vid)
           const hasQuote = Boolean(quote)

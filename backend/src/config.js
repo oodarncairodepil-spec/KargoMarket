@@ -1,12 +1,68 @@
-import dotenv from 'dotenv'
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import './envBootstrap.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+/** Root repo: backend/src -> ../.. */
 const repoRoot = path.resolve(__dirname, '../..')
-// Pastikan .env ketemu walau `node` dijalankan dari folder lain (cwd bukan root repo).
-dotenv.config({ path: path.join(repoRoot, '.env') })
-dotenv.config({ path: path.join(repoRoot, '.env.local') })
+
+/**
+ * Baca GOOGLE_GEOCODING_API_KEY dari satu file .env (tanpa BOM di awal file).
+ */
+function readGoogleKeyFromEnvPath(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return ''
+    let raw = fs.readFileSync(filePath, 'utf8')
+    raw = raw.replace(/^\uFEFF/, '')
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('#')) continue
+      const m = /^\s*GOOGLE_GEOCODING_API_KEY\s*=\s*(.*)$/.exec(line)
+      if (m) {
+        const v = m[1].trim().replace(/^["']|["']$/g, '')
+        return v
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
+/**
+ * Kunci geocoding: baca ulang dari process.env + beberapa lokasi .env (dev sering salah cwd).
+ * Dipanggil per request agar tidak tergantung urutan evaluasi modul vs dotenv.
+ */
+export function getGoogleGeocodingApiKey() {
+  const fromEnv = (process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim()
+  if (fromEnv) return fromEnv
+
+  const candidateRoots = new Set([
+    repoRoot,
+    process.cwd(),
+    path.resolve(process.cwd(), '..'),
+    path.resolve(__dirname, '..', '..'),
+  ])
+
+  const tried = new Set()
+  for (const root of candidateRoots) {
+    const normalized = path.normalize(root)
+    if (tried.has(normalized)) continue
+    tried.add(normalized)
+
+    const bases = [root, path.join(root, 'backend')]
+    for (const base of bases) {
+      for (const name of ['.env', '.env.local']) {
+        const p = path.join(base, name)
+        const key = readGoogleKeyFromEnvPath(p)
+        if (key) return key
+      }
+    }
+  }
+
+  return ''
+}
 
 export const config = {
   port: Number(process.env.API_PORT || 4000),

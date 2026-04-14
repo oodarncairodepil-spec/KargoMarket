@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { MapLocationPicker } from '../../components/MapLocationPicker'
+import { RegionAutocomplete } from '../../components/RegionAutocomplete'
 import { ProgressSteps } from '../../components/ProgressSteps'
 import { StickyCTA } from '../../components/StickyCTA'
 import { apiClient } from '../../lib/apiClient'
@@ -11,7 +13,6 @@ import {
   MAX_ITEM_IMAGES,
   sanitizeDimensionCm,
   sanitizeIdrDigits,
-  sanitizePostalCode,
   sanitizeWeightInput,
 } from '../../lib/inquiryFormHelpers'
 import { SPECIAL_TREATMENTS, TNC_SUMMARY_LINES, VEHICLE_TYPES } from '../../lib/inquiryServiceOptions'
@@ -28,15 +29,9 @@ type Step = 0 | 1 | 2 | 3
 
 type InvalidField =
   | 'pickupAddress'
-  | 'pickupKelurahan'
-  | 'pickupKecamatan'
-  | 'pickupKota'
-  | 'pickupPostalCode'
+  | 'pickupMap'
   | 'destinationAddress'
-  | 'destinationKelurahan'
-  | 'destinationKecamatan'
-  | 'destinationKota'
-  | 'destinationPostalCode'
+  | 'destinationMap'
   | 'itemDescription'
   | 'weight'
   | 'koliCount'
@@ -51,15 +46,9 @@ export function InquiryNewPage() {
   const user = useAuthStore((s) => s.user)
 
   const pickupAddressRef = useRef<HTMLTextAreaElement>(null)
-  const pickupKelurahanRef = useRef<HTMLInputElement>(null)
-  const pickupKecamatanRef = useRef<HTMLInputElement>(null)
-  const pickupKotaRef = useRef<HTMLInputElement>(null)
-  const pickupPostalCodeRef = useRef<HTMLInputElement>(null)
+  const pickupMapRef = useRef<HTMLDivElement>(null)
   const destinationAddressRef = useRef<HTMLTextAreaElement>(null)
-  const destinationKelurahanRef = useRef<HTMLInputElement>(null)
-  const destinationKecamatanRef = useRef<HTMLInputElement>(null)
-  const destinationKotaRef = useRef<HTMLInputElement>(null)
-  const destinationPostalCodeRef = useRef<HTMLInputElement>(null)
+  const destinationMapRef = useRef<HTMLDivElement>(null)
   const itemDescriptionRef = useRef<HTMLTextAreaElement>(null)
   const weightRef = useRef<HTMLInputElement>(null)
   const koliRef = useRef<HTMLInputElement>(null)
@@ -79,11 +68,29 @@ export function InquiryNewPage() {
   const [pickupKecamatan, setPickupKecamatan] = useState('')
   const [pickupKota, setPickupKota] = useState('')
   const [pickupPostalCode, setPickupPostalCode] = useState('')
+  const [pickupProvince, setPickupProvince] = useState('')
+  const [pickupCityId, setPickupCityId] = useState<string | null>(null)
+  const [pickupCityLabel, setPickupCityLabel] = useState<string | null>(null)
+  const [pickupMapSearch, setPickupMapSearch] = useState('')
+  const [pickupLat, setPickupLat] = useState('')
+  const [pickupLng, setPickupLng] = useState('')
+  const [pickupGeocodeLoading, setPickupGeocodeLoading] = useState(false)
+  const [pickupGeocodeOk, setPickupGeocodeOk] = useState(false)
+  const [pickupGeocodeErr, setPickupGeocodeErr] = useState('')
   const [destinationAddress, setDestinationAddress] = useState('')
   const [destinationKelurahan, setDestinationKelurahan] = useState('')
   const [destinationKecamatan, setDestinationKecamatan] = useState('')
   const [destinationKota, setDestinationKota] = useState('')
   const [destinationPostalCode, setDestinationPostalCode] = useState('')
+  const [destinationProvince, setDestinationProvince] = useState('')
+  const [destinationCityId, setDestinationCityId] = useState<string | null>(null)
+  const [destinationCityLabel, setDestinationCityLabel] = useState<string | null>(null)
+  const [destinationMapSearch, setDestinationMapSearch] = useState('')
+  const [destinationLat, setDestinationLat] = useState('')
+  const [destinationLng, setDestinationLng] = useState('')
+  const [destinationGeocodeLoading, setDestinationGeocodeLoading] = useState(false)
+  const [destinationGeocodeOk, setDestinationGeocodeOk] = useState(false)
+  const [destinationGeocodeErr, setDestinationGeocodeErr] = useState('')
   const [itemDescription, setItemDescription] = useState('')
   const [weight, setWeight] = useState('')
   const [lengthCm, setLengthCm] = useState('')
@@ -131,79 +138,67 @@ export function InquiryNewPage() {
     setInvalidField(null)
 
     if (step === 0) {
+      if (!pickupLat.trim() || !pickupLng.trim()) {
+        setError('Pilih lokasi asal di peta terlebih dahulu (cari lalu pilih dari daftar, atau tombol pin).')
+        setInvalidField('pickupMap')
+        focusField(pickupMapRef.current)
+        return
+      }
+      if (pickupGeocodeLoading) {
+        setError('Tunggu sebentar, alamat asal sedang diproses dari peta…')
+        return
+      }
+      if (!pickupGeocodeOk || !pickupKota.trim()) {
+        setError(
+          'Lokasi asal belum terkonfirmasi (reverse geocoding). Pilih ulang titik di peta atau coba lagi.',
+        )
+        setInvalidField('pickupMap')
+        focusField(pickupMapRef.current)
+        return
+      }
+      const pickupPc = pickupPostalCode.trim()
+      if (!/^\d{3,7}$/.test(pickupPc)) {
+        setError('Kode pos asal dari peta tidak valid. Pilih ulang lokasi di peta.')
+        setInvalidField('pickupMap')
+        focusField(pickupMapRef.current)
+        return
+      }
       if (!pickupAddress.trim()) {
-        setError('Alamat lengkap asal penjemputan wajib diisi.')
+        setError('Isi alamat lengkap asal penjemputan setelah memilih lokasi di peta dan kota/provinsi.')
         setInvalidField('pickupAddress')
         focusField(pickupAddressRef.current)
         return
       }
-      if (!pickupKelurahan.trim()) {
-        setError('Kelurahan asal wajib diisi.')
-        setInvalidField('pickupKelurahan')
-        focusField(pickupKelurahanRef.current)
-        return
-      }
-      if (!pickupKecamatan.trim()) {
-        setError('Kecamatan asal wajib diisi.')
-        setInvalidField('pickupKecamatan')
-        focusField(pickupKecamatanRef.current)
-        return
-      }
-      if (!pickupKota.trim()) {
-        setError('Kota asal wajib diisi.')
-        setInvalidField('pickupKota')
-        focusField(pickupKotaRef.current)
-        return
-      }
-      const pickupPc = pickupPostalCode.trim()
-      if (!pickupPc) {
-        setError('Kode pos asal wajib diisi (angka saja).')
-        setInvalidField('pickupPostalCode')
-        focusField(pickupPostalCodeRef.current)
-        return
-      }
-      if (!/^\d{3,7}$/.test(pickupPc)) {
-        setError('Kode pos asal tidak valid (gunakan angka, 3–7 digit).')
-        setInvalidField('pickupPostalCode')
-        focusField(pickupPostalCodeRef.current)
-        return
-      }
 
-      if (!destinationAddress.trim()) {
-        setError('Alamat lengkap tujuan wajib diisi.')
-        setInvalidField('destinationAddress')
-        focusField(destinationAddressRef.current)
+      if (!destinationLat.trim() || !destinationLng.trim()) {
+        setError('Pilih lokasi tujuan di peta terlebih dahulu (cari lalu pilih dari daftar, atau tombol pin).')
+        setInvalidField('destinationMap')
+        focusField(destinationMapRef.current)
         return
       }
-      if (!destinationKelurahan.trim()) {
-        setError('Kelurahan tujuan wajib diisi.')
-        setInvalidField('destinationKelurahan')
-        focusField(destinationKelurahanRef.current)
+      if (destinationGeocodeLoading) {
+        setError('Tunggu sebentar, alamat tujuan sedang diproses dari peta…')
         return
       }
-      if (!destinationKecamatan.trim()) {
-        setError('Kecamatan tujuan wajib diisi.')
-        setInvalidField('destinationKecamatan')
-        focusField(destinationKecamatanRef.current)
-        return
-      }
-      if (!destinationKota.trim()) {
-        setError('Kota tujuan wajib diisi.')
-        setInvalidField('destinationKota')
-        focusField(destinationKotaRef.current)
+      if (!destinationGeocodeOk || !destinationKota.trim()) {
+        setError(
+          'Lokasi tujuan belum terkonfirmasi (reverse geocoding). Pilih ulang titik di peta atau coba lagi.',
+        )
+        setInvalidField('destinationMap')
+        focusField(destinationMapRef.current)
         return
       }
       const destPc = destinationPostalCode.trim()
-      if (!destPc) {
-        setError('Kode pos tujuan wajib diisi (angka saja).')
-        setInvalidField('destinationPostalCode')
-        focusField(destinationPostalCodeRef.current)
+      if (!/^\d{3,7}$/.test(destPc)) {
+        setError('Kode pos tujuan dari peta tidak valid. Pilih ulang lokasi di peta.')
+        setInvalidField('destinationMap')
+        focusField(destinationMapRef.current)
         return
       }
-      if (!/^\d{3,7}$/.test(destPc)) {
-        setError('Kode pos tujuan tidak valid (gunakan angka, 3–7 digit).')
-        setInvalidField('destinationPostalCode')
-        focusField(destinationPostalCodeRef.current)
+      if (!destinationAddress.trim()) {
+        setError('Isi alamat lengkap tujuan setelah memilih lokasi di peta dan kota/provinsi.')
+        setInvalidField('destinationAddress')
+        focusField(destinationAddressRef.current)
         return
       }
     }
@@ -345,11 +340,15 @@ export function InquiryNewPage() {
       pickupKecamatan: pickupKecamatan.trim(),
       pickupKota: pickupKota.trim(),
       pickupPostalCode: pickupPostalCode.trim(),
+      pickupProvince: pickupProvince.trim(),
+      pickupCityId: pickupCityId ?? null,
       destinationAddress: destinationAddress.trim(),
       destinationKelurahan: destinationKelurahan.trim(),
       destinationKecamatan: destinationKecamatan.trim(),
       destinationKota: destinationKota.trim(),
       destinationPostalCode: destinationPostalCode.trim(),
+      destinationProvince: destinationProvince.trim(),
+      destinationCityId: destinationCityId ?? null,
       itemDescription: itemDescription.trim(),
       weight: w,
       dimensions: dims,
@@ -394,6 +393,122 @@ export function InquiryNewPage() {
       : 'rounded-2xl border border-slate-200 bg-slate-50/80 p-4'
 
   useEffect(() => {
+    if (!pickupLat || !pickupLng) {
+      setPickupGeocodeOk(false)
+      return
+    }
+    let cancelled = false
+    setPickupGeocodeLoading(true)
+    setPickupGeocodeErr('')
+    void (async () => {
+      try {
+        const data = (await apiClient.get(
+          `/customer/geocode/reverse?lat=${encodeURIComponent(pickupLat)}&lng=${encodeURIComponent(pickupLng)}`,
+        )) as {
+          city: string
+          province: string
+          postalCode: string
+          kelurahan: string
+          kecamatan: string
+          matchedCityId?: string | null
+          matchedCityLabel?: string | null
+        }
+        if (cancelled) return
+        setPickupKelurahan(data.kelurahan || '—')
+        setPickupKecamatan(data.kecamatan || '—')
+        setPickupKota(data.city || '')
+        const pc = (data.postalCode || '00000').replace(/\D/g, '').slice(0, 7)
+        setPickupPostalCode(pc || '00000')
+        setPickupProvince(data.province || '')
+        if (data.matchedCityId) {
+          setPickupCityId(String(data.matchedCityId))
+          setPickupCityLabel(data.matchedCityLabel ?? null)
+        } else {
+          setPickupCityId(null)
+          setPickupCityLabel(null)
+        }
+        const ok = Boolean(data.city?.trim()) && /^\d{3,7}$/.test(pc || '00000')
+        setPickupGeocodeOk(ok)
+        if (!ok) {
+          setPickupGeocodeErr('Alamat dari Google tidak lengkap (kota/kode pos). Coba titik lain di peta.')
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setPickupGeocodeOk(false)
+          setPickupGeocodeErr(
+            e instanceof Error
+              ? e.message
+              : 'Gagal menghubungi server geocode. Pastikan API berjalan dan GOOGLE_GEOCODING_API_KEY diset untuk proses backend.',
+          )
+        }
+      } finally {
+        if (!cancelled) setPickupGeocodeLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [pickupLat, pickupLng])
+
+  useEffect(() => {
+    if (!destinationLat || !destinationLng) {
+      setDestinationGeocodeOk(false)
+      return
+    }
+    let cancelled = false
+    setDestinationGeocodeLoading(true)
+    setDestinationGeocodeErr('')
+    void (async () => {
+      try {
+        const data = (await apiClient.get(
+          `/customer/geocode/reverse?lat=${encodeURIComponent(destinationLat)}&lng=${encodeURIComponent(destinationLng)}`,
+        )) as {
+          city: string
+          province: string
+          postalCode: string
+          kelurahan: string
+          kecamatan: string
+          matchedCityId?: string | null
+          matchedCityLabel?: string | null
+        }
+        if (cancelled) return
+        setDestinationKelurahan(data.kelurahan || '—')
+        setDestinationKecamatan(data.kecamatan || '—')
+        setDestinationKota(data.city || '')
+        const pc = (data.postalCode || '00000').replace(/\D/g, '').slice(0, 7)
+        setDestinationPostalCode(pc || '00000')
+        setDestinationProvince(data.province || '')
+        if (data.matchedCityId) {
+          setDestinationCityId(String(data.matchedCityId))
+          setDestinationCityLabel(data.matchedCityLabel ?? null)
+        } else {
+          setDestinationCityId(null)
+          setDestinationCityLabel(null)
+        }
+        const ok = Boolean(data.city?.trim()) && /^\d{3,7}$/.test(pc || '00000')
+        setDestinationGeocodeOk(ok)
+        if (!ok) {
+          setDestinationGeocodeErr('Alamat dari Google tidak lengkap (kota/kode pos). Coba titik lain di peta.')
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setDestinationGeocodeOk(false)
+          setDestinationGeocodeErr(
+            e instanceof Error
+              ? e.message
+              : 'Gagal menghubungi server geocode. Pastikan API berjalan dan GOOGLE_GEOCODING_API_KEY diset untuk proses backend.',
+          )
+        }
+      } finally {
+        if (!cancelled) setDestinationGeocodeLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [destinationLat, destinationLng])
+
+  useEffect(() => {
     if (step > 0) {
       scrollToTopBar()
     }
@@ -413,6 +528,73 @@ export function InquiryNewPage() {
           <div className="flex flex-col gap-6 text-left">
             <fieldset className="min-w-0 space-y-3 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
               <legend className="px-1 text-base font-semibold text-slate-900">Asal penjemputan</legend>
+              <div
+                ref={pickupMapRef}
+                className={`space-y-2 rounded-xl ${invalidField === 'pickupMap' ? 'ring-2 ring-red-400 ring-offset-2' : ''}`}
+                tabIndex={-1}
+              >
+                <MapLocationPicker
+                  label="Lokasi di peta (cari lalu pilih dari daftar, atau pin GPS)"
+                  iframeTitle="Peta asal penjemputan"
+                  inputClassName={fieldClass(invalidField, 'pickupMap')}
+                  latitude={pickupLat}
+                  longitude={pickupLng}
+                  searchDisplay={pickupMapSearch}
+                  onSearchDisplayChange={(v) => {
+                    setPickupMapSearch(v)
+                    if (invalidField === 'pickupMap') setInvalidField(null)
+                  }}
+                  onLatLngChange={(lat, lng) => {
+                    setPickupLat(lat)
+                    setPickupLng(lng)
+                    if (invalidField === 'pickupMap') setInvalidField(null)
+                  }}
+                />
+                {pickupGeocodeLoading ? (
+                  <p className="text-xs text-slate-500">Mengambil kota, provinsi, dan kode pos dari titik peta…</p>
+                ) : null}
+                {pickupLat && pickupLng && !pickupGeocodeLoading && pickupGeocodeOk ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2 text-xs text-slate-700">
+                    <p className="font-semibold text-slate-900">Ringkasan alamat (dari Google)</p>
+                    <p>Kota/Kab: {pickupKota || '—'}</p>
+                    <p>Provinsi: {pickupProvince || '—'}</p>
+                    <p>Kode pos: {pickupPostalCode}</p>
+                    <p className="text-slate-500">
+                      Kelurahan: {pickupKelurahan} · Kecamatan: {pickupKecamatan}
+                    </p>
+                    {pickupCityId ? (
+                      <p className="mt-1 text-slate-600">
+                        Referensi BPS:{' '}
+                        <span className="font-medium text-slate-900">{pickupCityLabel || `#${pickupCityId}`}</span>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {pickupLat && pickupLng && !pickupGeocodeLoading && !pickupGeocodeOk ? (
+                  <p className="text-xs text-red-700">
+                    {pickupGeocodeErr ||
+                      'Gagal membaca detail alamat. Pastikan backend punya GOOGLE_GEOCODING_API_KEY, Geocoding API aktif, dan billing Google Maps. Pilih titik lain atau coba lagi.'}
+                  </p>
+                ) : null}
+              </div>
+              <RegionAutocomplete
+                key={`pickup-${pickupCityId ?? `${pickupLat},${pickupLng}`}`}
+                label="Kota & provinsi (referensi BPS)"
+                inputClassName={inputClass}
+                selectedId={pickupCityId}
+                selectedLabel={pickupCityLabel}
+                onSelect={(h) => {
+                  setPickupCityId(h.id)
+                  setPickupCityLabel(h.label)
+                  setPickupKota(h.cityName)
+                  setPickupProvince(h.provinceName)
+                }}
+                onClear={() => {
+                  setPickupCityId(null)
+                  setPickupCityLabel(null)
+                }}
+                disabled={submitting}
+              />
               <label className="text-sm font-medium text-slate-700">
                 Alamat lengkap
                 <textarea
@@ -427,69 +609,79 @@ export function InquiryNewPage() {
                   autoComplete="street-address"
                 />
               </label>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="text-sm font-medium text-slate-700">
-                  Kelurahan / Desa
-                  <input
-                    ref={pickupKelurahanRef}
-                    className={fieldClass(invalidField, 'pickupKelurahan')}
-                    value={pickupKelurahan}
-                    onChange={(e) => {
-                      setPickupKelurahan(e.target.value)
-                      if (invalidField === 'pickupKelurahan') setInvalidField(null)
-                    }}
-                    placeholder="Contoh: Menteng"
-                    autoComplete="address-level4"
-                  />
-                </label>
-                <label className="text-sm font-medium text-slate-700">
-                  Kecamatan
-                  <input
-                    ref={pickupKecamatanRef}
-                    className={fieldClass(invalidField, 'pickupKecamatan')}
-                    value={pickupKecamatan}
-                    onChange={(e) => {
-                      setPickupKecamatan(e.target.value)
-                      if (invalidField === 'pickupKecamatan') setInvalidField(null)
-                    }}
-                    placeholder="Contoh: Menteng"
-                    autoComplete="address-level3"
-                  />
-                </label>
-              </div>
-              <label className="text-sm font-medium text-slate-700">
-                Kota / Kabupaten
-                <input
-                  ref={pickupKotaRef}
-                  className={fieldClass(invalidField, 'pickupKota')}
-                  value={pickupKota}
-                  onChange={(e) => {
-                    setPickupKota(e.target.value)
-                    if (invalidField === 'pickupKota') setInvalidField(null)
-                  }}
-                  placeholder="Contoh: Jakarta Pusat"
-                  autoComplete="address-level2"
-                />
-              </label>
-              <label className="text-sm font-medium text-slate-700">
-                Kode pos (angka saja)
-                <input
-                  ref={pickupPostalCodeRef}
-                  className={fieldClass(invalidField, 'pickupPostalCode')}
-                  inputMode="numeric"
-                  value={pickupPostalCode}
-                  onChange={(e) => {
-                    setPickupPostalCode(sanitizePostalCode(e.target.value))
-                    if (invalidField === 'pickupPostalCode') setInvalidField(null)
-                  }}
-                  placeholder="10310"
-                  maxLength={7}
-                />
-              </label>
             </fieldset>
 
             <fieldset className="min-w-0 space-y-3 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
               <legend className="px-1 text-base font-semibold text-slate-900">Tujuan pengiriman</legend>
+              <div
+                ref={destinationMapRef}
+                className={`space-y-2 rounded-xl ${invalidField === 'destinationMap' ? 'ring-2 ring-red-400 ring-offset-2' : ''}`}
+                tabIndex={-1}
+              >
+                <MapLocationPicker
+                  label="Lokasi di peta (cari lalu pilih dari daftar, atau pin GPS)"
+                  iframeTitle="Peta tujuan pengiriman"
+                  inputClassName={fieldClass(invalidField, 'destinationMap')}
+                  latitude={destinationLat}
+                  longitude={destinationLng}
+                  searchDisplay={destinationMapSearch}
+                  onSearchDisplayChange={(v) => {
+                    setDestinationMapSearch(v)
+                    if (invalidField === 'destinationMap') setInvalidField(null)
+                  }}
+                  onLatLngChange={(lat, lng) => {
+                    setDestinationLat(lat)
+                    setDestinationLng(lng)
+                    if (invalidField === 'destinationMap') setInvalidField(null)
+                  }}
+                />
+                {destinationGeocodeLoading ? (
+                  <p className="text-xs text-slate-500">Mengambil kota, provinsi, dan kode pos dari titik peta…</p>
+                ) : null}
+                {destinationLat && destinationLng && !destinationGeocodeLoading && destinationGeocodeOk ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2 text-xs text-slate-700">
+                    <p className="font-semibold text-slate-900">Ringkasan alamat (dari Google)</p>
+                    <p>Kota/Kab: {destinationKota || '—'}</p>
+                    <p>Provinsi: {destinationProvince || '—'}</p>
+                    <p>Kode pos: {destinationPostalCode}</p>
+                    <p className="text-slate-500">
+                      Kelurahan: {destinationKelurahan} · Kecamatan: {destinationKecamatan}
+                    </p>
+                    {destinationCityId ? (
+                      <p className="mt-1 text-slate-600">
+                        Referensi BPS:{' '}
+                        <span className="font-medium text-slate-900">
+                          {destinationCityLabel || `#${destinationCityId}`}
+                        </span>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {destinationLat && destinationLng && !destinationGeocodeLoading && !destinationGeocodeOk ? (
+                  <p className="text-xs text-red-700">
+                    {destinationGeocodeErr ||
+                      'Gagal membaca detail alamat. Pastikan backend punya GOOGLE_GEOCODING_API_KEY, Geocoding API aktif, dan billing Google Maps. Pilih titik lain atau coba lagi.'}
+                  </p>
+                ) : null}
+              </div>
+              <RegionAutocomplete
+                key={`dest-${destinationCityId ?? `${destinationLat},${destinationLng}`}`}
+                label="Kota & provinsi (referensi BPS)"
+                inputClassName={inputClass}
+                selectedId={destinationCityId}
+                selectedLabel={destinationCityLabel}
+                onSelect={(h) => {
+                  setDestinationCityId(h.id)
+                  setDestinationCityLabel(h.label)
+                  setDestinationKota(h.cityName)
+                  setDestinationProvince(h.provinceName)
+                }}
+                onClear={() => {
+                  setDestinationCityId(null)
+                  setDestinationCityLabel(null)
+                }}
+                disabled={submitting}
+              />
               <label className="text-sm font-medium text-slate-700">
                 Alamat lengkap
                 <textarea
@@ -501,62 +693,6 @@ export function InquiryNewPage() {
                     if (invalidField === 'destinationAddress') setInvalidField(null)
                   }}
                   placeholder="Jalan, nomor, RT/RW, gedung…"
-                />
-              </label>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="text-sm font-medium text-slate-700">
-                  Kelurahan / Desa
-                  <input
-                    ref={destinationKelurahanRef}
-                    className={fieldClass(invalidField, 'destinationKelurahan')}
-                    value={destinationKelurahan}
-                    onChange={(e) => {
-                      setDestinationKelurahan(e.target.value)
-                      if (invalidField === 'destinationKelurahan') setInvalidField(null)
-                    }}
-                    placeholder="Contoh: Gubeng"
-                  />
-                </label>
-                <label className="text-sm font-medium text-slate-700">
-                  Kecamatan
-                  <input
-                    ref={destinationKecamatanRef}
-                    className={fieldClass(invalidField, 'destinationKecamatan')}
-                    value={destinationKecamatan}
-                    onChange={(e) => {
-                      setDestinationKecamatan(e.target.value)
-                      if (invalidField === 'destinationKecamatan') setInvalidField(null)
-                    }}
-                    placeholder="Contoh: Gubeng"
-                  />
-                </label>
-              </div>
-              <label className="text-sm font-medium text-slate-700">
-                Kota / Kabupaten
-                <input
-                  ref={destinationKotaRef}
-                  className={fieldClass(invalidField, 'destinationKota')}
-                  value={destinationKota}
-                  onChange={(e) => {
-                    setDestinationKota(e.target.value)
-                    if (invalidField === 'destinationKota') setInvalidField(null)
-                  }}
-                  placeholder="Contoh: Surabaya"
-                />
-              </label>
-              <label className="text-sm font-medium text-slate-700">
-                Kode pos (angka saja)
-                <input
-                  ref={destinationPostalCodeRef}
-                  className={fieldClass(invalidField, 'destinationPostalCode')}
-                  inputMode="numeric"
-                  value={destinationPostalCode}
-                  onChange={(e) => {
-                    setDestinationPostalCode(sanitizePostalCode(e.target.value))
-                    if (invalidField === 'destinationPostalCode') setInvalidField(null)
-                  }}
-                  placeholder="60286"
-                  maxLength={7}
                 />
               </label>
             </fieldset>
