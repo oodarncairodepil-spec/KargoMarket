@@ -19,6 +19,10 @@ type InquiryRow = {
   id: string
   pickup_kota: string
   destination_kota: string
+  pickup_province?: string | null
+  destination_province?: string | null
+  pickup?: string | null
+  destination?: string | null
   item_description: string
   weight: string
   scheduled_pickup_date: string
@@ -36,6 +40,62 @@ type VendorRow = {
 type TokenRow = {
   token: string
   vendor_id: string
+}
+
+/** Samakan label BPS vs geocoder (selaras dengan AdminInquiryDetailPage). */
+function normalizeArea(value: string | null | undefined): string {
+  return (value || '').trim().toLowerCase()
+}
+
+function normalizeCityLabelForMatch(s: string): string {
+  let t = normalizeArea(s)
+  t = t.replace(/\b(kota|kab\.?|kabupaten)\s+adm\.?\s+/gi, '$1 ')
+  t = t.replace(/\s+/g, ' ').trim()
+  return t
+}
+
+function stripKotaKabPrefix(s: string): string {
+  return s.replace(/^(kota|kabupaten|kab\.)\s+/i, '').trim()
+}
+
+function vendorCityLineMatchesInquiryFragment(vendorLine: string, inquiryFragment: string): boolean {
+  const vFull = normalizeCityLabelForMatch(vendorLine)
+  const iFrag = normalizeCityLabelForMatch(inquiryFragment)
+  if (!vFull || !iFrag) return false
+
+  const vCityOnly = vFull.split(',')[0].trim()
+
+  if (vFull.includes(iFrag) || iFrag.includes(vFull)) return true
+  if (vCityOnly.includes(iFrag) || iFrag.includes(vCityOnly)) return true
+
+  const vCore = stripKotaKabPrefix(vCityOnly)
+  const iCore = stripKotaKabPrefix(iFrag)
+  if (vCore && iCore && (vCore === iCore || vCore.includes(iCore) || iCore.includes(vCore))) return true
+
+  return false
+}
+
+function listMatchesRoute(list: string[], candidates: string[]): boolean {
+  if (list.length === 0) return false
+  if (candidates.length === 0) return true
+  return list.some((vendorLine) =>
+    candidates.some((inquiryPart) => vendorCityLineMatchesInquiryFragment(vendorLine, inquiryPart)),
+  )
+}
+
+function inquiryOriginCandidates(inq: InquiryRow): string[] {
+  return [inq.pickup_kota, inq.pickup, inq.pickup_province].map(normalizeArea).filter(Boolean)
+}
+
+function inquiryDestinationCandidates(inq: InquiryRow): string[] {
+  return [inq.destination_kota, inq.destination, inq.destination_province].map(normalizeArea).filter(Boolean)
+}
+
+function vendorRowMatchesInquiryRoute(v: VendorRow, inq: InquiryRow): boolean {
+  const oc = v.origin_cities || []
+  const dc = v.destination_cities || []
+  if (oc.length === 0 || dc.length === 0) return false
+  return listMatchesRoute(oc, inquiryOriginCandidates(inq)) && listMatchesRoute(dc, inquiryDestinationCandidates(inq))
 }
 
 function requiredEnv(name: string): string {
@@ -192,7 +252,9 @@ export async function sendInquiryBroadcast(
 
   const { data: inquiry, error: inqErr } = await supabase
     .from('km_inquiries')
-    .select('id,pickup_kota,destination_kota,item_description,weight,scheduled_pickup_date')
+    .select(
+      'id,pickup_kota,destination_kota,pickup_province,destination_province,pickup,destination,item_description,weight,scheduled_pickup_date',
+    )
     .eq('id', inquiryId)
     .maybeSingle<InquiryRow>()
 
@@ -242,6 +304,7 @@ export async function sendInquiryBroadcast(
     vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
     console.log(`[broadcast] admin_selected count=${vendors.length}`)
   } else {
+    // Fast path: elemen text[] harus sama persis dgn pickup/destination_kota (sering gagal untuk BPS vs geocoder).
     {
       const base = supabase
         .from('vendors')
@@ -271,40 +334,69 @@ export async function sendInquiryBroadcast(
       }
     }
 
-    // Optional: enforce active vendors only if field is present.
     vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
 
-    // Fallback: jika data onboarding `origin_cities/destination_cities` belum terisi,
-    // gunakan daftar vendor yang sudah punya token di km_vendor_tokens (dibuat oleh backend).
-    // Ini memastikan broadcast tetap berjalan untuk inquiry yang sudah dibuat.
+    // Fuzzy path: samakan label seperti di admin (mis. "Kota Jakarta Timur" vs "Kota Adm. Jakarta Timur, Dki Jakarta").
     if (vendors.length === 0) {
-    const { data: tokenRows, error: tokenErr } = await supabase
-      .from('km_vendor_tokens')
-      .select('token,vendor_id')
-      .eq('inquiry_id', inquiryId)
-      .is('revoked_at', null)
-      .returns<TokenRow[]>()
-    if (tokenErr) {
-      summary.failed += 1
-      summary.errors.push({ stage: 'vendor_query', message: tokenErr.message })
-      return summary
-    }
-    for (const t of tokenRows || []) tokensByVendor.set(t.vendor_id, t.token)
-    const vendorIds = Array.from(tokensByVendor.keys())
-    if (vendorIds.length > 0) {
-      const { data: vendorRows, error: vErr } = await supabase
-        .from('vendors')
-        .select('id,name,email,is_active')
-        .in('id', vendorIds)
-        .returns<VendorRow[]>()
-      if (vErr) {
+      const pageSize = 1000
+      const pullAll = async (sel: string): Promise<{ rows: VendorRow[]; error: { message: string } | null }> => {
+        const rows: VendorRow[] = []
+        for (let from = 0; from < 100_000; from += pageSize) {
+          const res = await supabase.from('vendors').select(sel).range(from, from + pageSize - 1)
+          if (res.error) return { rows: [], error: res.error }
+          const chunk = (res.data || []) as VendorRow[]
+          rows.push(...chunk)
+          if (chunk.length < pageSize) break
+        }
+        return { rows, error: null }
+      }
+
+      let pr = await pullAll('id,name,email,origin_cities,destination_cities,is_active')
+      if (pr.error && /is_active/i.test(pr.error.message)) {
+        pr = await pullAll('id,name,email,origin_cities,destination_cities')
+      }
+      if (pr.error) {
         summary.failed += 1
-        summary.errors.push({ stage: 'vendor_query', message: vErr.message })
+        summary.errors.push({ stage: 'vendor_query', message: pr.error.message })
         return summary
       }
-      vendors = (vendorRows || []).filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
-      console.log(`[broadcast] fallback_from_tokens vendors=${vendors.length} tokens=${vendorIds.length}`)
+
+      const scanned = pr.rows.length
+      let broad = pr.rows
+      broad = broad.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+      vendors = broad.filter((v) => vendorRowMatchesInquiryRoute(v, inquiry))
+      console.log(`[broadcast] fuzzy_route vendors=${vendors.length} scanned=${scanned}`)
     }
+
+    // Fallback: token km_vendor_tokens jika route masih kosong (inquiry lama / edge case).
+    if (vendors.length === 0) {
+      const { data: tokenRows, error: tokenErr } = await supabase
+        .from('km_vendor_tokens')
+        .select('token,vendor_id')
+        .eq('inquiry_id', inquiryId)
+        .is('revoked_at', null)
+        .returns<TokenRow[]>()
+      if (tokenErr) {
+        summary.failed += 1
+        summary.errors.push({ stage: 'vendor_query', message: tokenErr.message })
+        return summary
+      }
+      for (const t of tokenRows || []) tokensByVendor.set(t.vendor_id, t.token)
+      const vendorIds = Array.from(tokensByVendor.keys())
+      if (vendorIds.length > 0) {
+        const { data: vendorRows, error: vErr } = await supabase
+          .from('vendors')
+          .select('id,name,email,is_active')
+          .in('id', vendorIds)
+          .returns<VendorRow[]>()
+        if (vErr) {
+          summary.failed += 1
+          summary.errors.push({ stage: 'vendor_query', message: vErr.message })
+          return summary
+        }
+        vendors = (vendorRows || []).filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+        console.log(`[broadcast] fallback_from_tokens vendors=${vendors.length} tokens=${vendorIds.length}`)
+      }
     }
   }
 
