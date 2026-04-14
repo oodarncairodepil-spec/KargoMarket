@@ -24,6 +24,12 @@ const dayOptions = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Mingg
 const cityOptions = ['Jakarta', 'Bandung', 'Surabaya', 'Semarang', 'Yogyakarta', 'Denpasar', 'Makassar', 'Medan', 'Balikpapan'] as const
 const pricingSchemes = ['Harga Nett', 'Fee (Komisi)'] as const
 const pricingMethods = ['Per kg', 'Per trip', 'Per Koli', 'Custom'] as const
+type MapLocationSuggestion = {
+  display_name: string
+  lat: string
+  lon: string
+}
+
 type VendorFilters = {
   businessTypes: (typeof businessTypes)[number][]
   originCities: string[]
@@ -303,6 +309,8 @@ export function AdminVendorManagementPage() {
   /** Nama tempat yang jelas (Nominatim / GPS / label tersimpan), terpisah dari kolom cari. */
   const [officeMapPlaceLabel, setOfficeMapPlaceLabel] = useState('')
   const [locating, setLocating] = useState(false)
+  const [officeLocationSuggestions, setOfficeLocationSuggestions] = useState<MapLocationSuggestion[]>([])
+  const [officeLocationLoading, setOfficeLocationLoading] = useState(false)
   const [slaResponse, setSlaResponse] = useState('')
   const [insuranceTerms, setInsuranceTerms] = useState('')
   const [packingFeeTerms, setPackingFeeTerms] = useState('')
@@ -341,6 +349,30 @@ export function AdminVendorManagementPage() {
     const t = setTimeout(() => setVendorSearchDebounced(vendorSearchInput), 400)
     return () => clearTimeout(t)
   }, [vendorSearchInput])
+
+  useEffect(() => {
+    const q = officeLocationSearch.trim()
+    if (q.length < 3) {
+      setOfficeLocationSuggestions([])
+      setOfficeLocationLoading(false)
+      return
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setOfficeLocationLoading(true)
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`,
+        )
+        const data = (await res.json()) as MapLocationSuggestion[]
+        setOfficeLocationSuggestions(Array.isArray(data) ? data : [])
+      } catch {
+        setOfficeLocationSuggestions([])
+      } finally {
+        setOfficeLocationLoading(false)
+      }
+    }, 350)
+    return () => clearTimeout(timer)
+  }, [officeLocationSearch])
 
   const fetchVendorsPage = useCallback(
     async (pageIndex: number, searchQ: string, filters: VendorFilters) => {
@@ -534,6 +566,7 @@ export function AdminVendorManagementPage() {
         setOfficeMapsLink(`https://maps.google.com/?q=${lat},${lng}`)
         setOfficeLocationSearch(`${lat.toFixed(6)}, ${lng.toFixed(6)}`)
         setOfficeMapPlaceLabel('Lokasi dari GPS (perangkat)')
+        setOfficeLocationSuggestions([])
         setError('')
         setLocating(false)
       },
@@ -607,6 +640,8 @@ export function AdminVendorManagementPage() {
     setOfficePhotoDataUrl(undefined)
     setOfficeMapsLink('')
     setOfficeMapPlaceLabel('')
+    setOfficeLocationSuggestions([])
+    setOfficeLocationLoading(false)
     preservedOfficeCityIdRef.current = null
     setOfficeLocationSearch('')
     setOfficeLatitude('')
@@ -691,6 +726,8 @@ export function AdminVendorManagementPage() {
     setIsActive(v.isActive !== false)
     setError('')
     setSuccess('')
+    setOfficeLocationSuggestions([])
+    setOfficeLocationLoading(false)
     setInvalidField(null)
     setViewMode('form')
   }
@@ -1423,6 +1460,7 @@ export function AdminVendorManagementPage() {
                     clearInvalid('officeMapsLink')
                   }}
                   placeholder="Cari alamat/lokasi kantor..."
+                  autoComplete="off"
                 />
                 <button
                   type="button"
@@ -1441,6 +1479,38 @@ export function AdminVendorManagementPage() {
                   </svg>
                 </button>
               </div>
+              {(officeLocationLoading || officeLocationSuggestions.length > 0) && (
+                <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                  {officeLocationLoading && (
+                    <p className="px-3 py-2 text-xs text-slate-500">Mencari rekomendasi lokasi...</p>
+                  )}
+                  {!officeLocationLoading && officeLocationSuggestions.length > 0 && (
+                    <ul className="max-h-48 overflow-auto">
+                      {officeLocationSuggestions.map((s, idx) => (
+                        <li key={`${s.lat}-${s.lon}-${idx}`}>
+                          <button
+                            type="button"
+                            className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+                            onClick={() => {
+                              const lat = Number(s.lat).toFixed(6)
+                              const lng = Number(s.lon).toFixed(6)
+                              setOfficeLocationSearch(s.display_name)
+                              setOfficeMapPlaceLabel(s.display_name)
+                              setOfficeLatitude(lat)
+                              setOfficeLongitude(lng)
+                              setOfficeMapsLink(`https://maps.google.com/?q=${lat},${lng}`)
+                              setOfficeLocationSuggestions([])
+                              setOfficeLocationLoading(false)
+                            }}
+                          >
+                            {s.display_name}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           {(officeMapsLink || (officeLatitude && officeLongitude)) && (
