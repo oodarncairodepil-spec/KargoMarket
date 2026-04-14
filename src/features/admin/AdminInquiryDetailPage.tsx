@@ -199,6 +199,7 @@ export function AdminInquiryDetailPage() {
   const [broadcastSubmitting, setBroadcastSubmitting] = useState(false)
   const [broadcastProgressPct, setBroadcastProgressPct] = useState(0)
   const broadcastProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const broadcastSelectAllRef = useRef<HTMLInputElement | null>(null)
 
   const loadDetail = useCallback(async () => {
     if (!id) return
@@ -328,6 +329,15 @@ export function AdminInquiryDetailPage() {
     vendorNameQuery,
   ])
 
+  const selectedVisibleCount = useMemo(() => {
+    if (filteredMatchedVendorIds.length === 0) return 0
+    const selectedSet = new Set(broadcastVendorIds)
+    return filteredMatchedVendorIds.reduce((acc, vid) => acc + (selectedSet.has(vid) ? 1 : 0), 0)
+  }, [broadcastVendorIds, filteredMatchedVendorIds])
+  const allVisibleSelected =
+    filteredMatchedVendorIds.length > 0 && selectedVisibleCount === filteredMatchedVendorIds.length
+  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected
+
   useEffect(() => {
     if (!inquiry) {
       setRouteVendors([])
@@ -362,6 +372,12 @@ export function AdminInquiryDetailPage() {
       if (broadcastProgressTimerRef.current) clearInterval(broadcastProgressTimerRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    if (broadcastSelectAllRef.current) {
+      broadcastSelectAllRef.current.indeterminate = someVisibleSelected
+    }
+  }, [someVisibleSelected])
 
   if (!id) {
     return (
@@ -514,16 +530,13 @@ export function AdminInquiryDetailPage() {
     }, 420)
   }
 
-  function selectAllFilteredForBroadcast() {
-    setBroadcastVendorIds([...filteredMatchedVendorIds])
-  }
-
-  function selectAllRouteSupportedForBroadcast() {
-    setBroadcastVendorIds([...routeSupportedVendorIds])
-  }
-
-  function clearBroadcastSelection() {
-    setBroadcastVendorIds([])
+  function setAllFilteredSelection(checked: boolean) {
+    if (checked) {
+      setBroadcastVendorIds((prev) => Array.from(new Set([...prev, ...filteredMatchedVendorIds])))
+      return
+    }
+    const visibleSet = new Set(filteredMatchedVendorIds)
+    setBroadcastVendorIds((prev) => prev.filter((id) => !visibleSet.has(id)))
   }
 
   async function sendVendorEmailBroadcast() {
@@ -775,42 +788,34 @@ export function AdminInquiryDetailPage() {
           <p className="mt-1 text-xs font-medium text-slate-600">
             Dipilih: {broadcastVendorIds.length} dari {routeSupportedVendorIds.length} vendor rute
           </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={selectAllRouteSupportedForBroadcast}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
-            >
-              Pilih semua vendor rute
-            </button>
-            <button
-              type="button"
-              onClick={selectAllFilteredForBroadcast}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
-            >
-              Pilih semua (terlihat)
-            </button>
-            <button
-              type="button"
-              onClick={clearBroadcastSelection}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
-            >
-              Hapus pilihan
-            </button>
-            <Button
-              type="button"
-              disabled={broadcastVendorIds.length === 0 || broadcastSubmitting}
-              onClick={() => void sendVendorEmailBroadcast()}
-              className="min-h-10 text-sm"
-            >
-              {broadcastSubmitting ? 'Mengirim…' : `Kirim email (${broadcastVendorIds.length})`}
-            </Button>
-          </div>
         </div>
       )}
 
       {filteredMatchedVendorIds.length === 0 && (
         <p className="text-left text-sm text-slate-600">Tidak ada vendor yang cocok dengan filter.</p>
+      )}
+
+      {filteredMatchedVendorIds.length > 0 && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2">
+          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+            <input
+              ref={broadcastSelectAllRef}
+              type="checkbox"
+              checked={allVisibleSelected}
+              onChange={(e) => setAllFilteredSelection(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-accent"
+            />
+            Pilih semua vendor terlihat ({selectedVisibleCount}/{filteredMatchedVendorIds.length})
+          </label>
+          <Button
+            type="button"
+            disabled={broadcastVendorIds.length === 0 || broadcastSubmitting}
+            onClick={() => void sendVendorEmailBroadcast()}
+            className="min-h-10 text-sm"
+          >
+            {broadcastSubmitting ? 'Mengirim…' : `Kirim email (${broadcastVendorIds.length})`}
+          </Button>
+        </div>
       )}
 
       <div className="flex flex-col gap-3">
