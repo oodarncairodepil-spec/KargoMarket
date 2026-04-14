@@ -75,6 +75,37 @@ function normalizeArea(value: string | null | undefined): string {
   return (value || '').trim().toLowerCase()
 }
 
+/** Samakan label BPS/geo ("Kota Adm. Jakarta Timur") dengan label ringkas ("Kota Jakarta Timur"). */
+function normalizeCityLabelForMatch(s: string): string {
+  let t = normalizeArea(s)
+  // "Kota Adm. X" / "Kab. Adm." → "kota x" agar cocok dengan data inquiry tanpa "Adm."
+  t = t.replace(/\b(kota|kab\.?|kabupaten)\s+adm\.?\s+/gi, '$1 ')
+  t = t.replace(/\s+/g, ' ').trim()
+  return t
+}
+
+function stripKotaKabPrefix(s: string): string {
+  return s.replace(/^(kota|kabupaten|kab\.)\s+/i, '').trim()
+}
+
+/** Apakah satu baris kota vendor (boleh "Kota, Provinsi") cocok dengan fragmen inquiry. */
+function vendorCityLineMatchesInquiryFragment(vendorLine: string, inquiryFragment: string): boolean {
+  const vFull = normalizeCityLabelForMatch(vendorLine)
+  const iFrag = normalizeCityLabelForMatch(inquiryFragment)
+  if (!vFull || !iFrag) return false
+
+  const vCityOnly = vFull.split(',')[0].trim()
+
+  if (vFull.includes(iFrag) || iFrag.includes(vFull)) return true
+  if (vCityOnly.includes(iFrag) || iFrag.includes(vCityOnly)) return true
+
+  const vCore = stripKotaKabPrefix(vCityOnly)
+  const iCore = stripKotaKabPrefix(iFrag)
+  if (vCore && iCore && (vCore === iCore || vCore.includes(iCore) || iCore.includes(vCore))) return true
+
+  return false
+}
+
 function routeAreaCandidates(inquiry: AdminInquiryDetail, kind: 'origin' | 'destination'): string[] {
   const values =
     kind === 'origin'
@@ -84,18 +115,10 @@ function routeAreaCandidates(inquiry: AdminInquiryDetail, kind: 'origin' | 'dest
 }
 
 function listMatchesRoute(list: string[], candidates: string[]): boolean {
-  const normalized = list.map(normalizeArea).filter(Boolean)
-  if (normalized.length === 0) return false
+  if (list.length === 0) return false
   if (candidates.length === 0) return true
-  return normalized.some((item) =>
-    candidates.some((candidate) => {
-      if (candidate.includes(item) || item.includes(candidate)) return true
-      const itemParts = item
-        .split(',')
-        .map((p) => p.trim())
-        .filter(Boolean)
-      return itemParts.some((part) => candidate.includes(part) || part.includes(candidate))
-    }),
+  return list.some((vendorLine) =>
+    candidates.some((inquiryPart) => vendorCityLineMatchesInquiryFragment(vendorLine, inquiryPart)),
   )
 }
 
@@ -161,6 +184,8 @@ export function AdminInquiryDetailPage() {
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [paymentConfirmUploading, setPaymentConfirmUploading] = useState(false)
   const [routeVendors, setRouteVendors] = useState<RouteVendorProfile[]>([])
+  const [broadcastVendorIds, setBroadcastVendorIds] = useState<string[]>([])
+  const [broadcastSubmitting, setBroadcastSubmitting] = useState(false)
 
   const loadDetail = useCallback(async () => {
     if (!id) return
@@ -452,6 +477,43 @@ export function AdminInquiryDetailPage() {
     }
   }
 
+  function toggleBroadcastVendor(vid: string) {
+    setBroadcastVendorIds((prev) => (prev.includes(vid) ? prev.filter((x) => x !== vid) : [...prev, vid]))
+  }
+
+  function selectAllFilteredForBroadcast() {
+    setBroadcastVendorIds([...filteredMatchedVendorIds])
+  }
+
+  function clearBroadcastSelection() {
+    setBroadcastVendorIds([])
+  }
+
+  async function sendVendorEmailBroadcast() {
+    if (!inquiryId || broadcastVendorIds.length === 0 || broadcastSubmitting) return
+    setBroadcastSubmitting(true)
+    setToast('')
+    try {
+      const res = (await apiClient.post(`/admin/inquiries/${inquiryId}/broadcast`, {
+        vendorIds: broadcastVendorIds,
+      })) as { success?: number; failed?: number; errors?: { message?: string; vendorId?: string }[] }
+      const ok = typeof res.success === 'number' ? res.success : 0
+      const fail = typeof res.failed === 'number' ? res.failed : 0
+      const extra =
+        fail > 0 && Array.isArray(res.errors) && res.errors[0]?.message
+          ? ` (${res.errors[0].message.slice(0, 80)})`
+          : ''
+      setToast(`Broadcast email: ${ok} terkirim${fail ? `, ${fail} gagal` : ''}.${extra}`)
+      setBroadcastVendorIds([])
+      await loadDetail()
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Gagal mengirim email ke vendor.')
+    } finally {
+      setBroadcastSubmitting(false)
+      setTimeout(() => setToast(''), 6000)
+    }
+  }
+
   async function releaseToCustomer() {
     try {
       await apiClient.post(`/admin/inquiries/${inquiryId}/release-quotes`, {})
@@ -644,6 +706,40 @@ export function AdminInquiryDetailPage() {
         </label>
       </div>
 
+      {filteredMatchedVendorIds.length > 0 && (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 text-left">
+          <p className="text-xs font-medium text-slate-700">Email broadcast ke vendor</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Centang vendor lalu kirim undangan email (link penawaran). Hanya vendor yang punya email aktif di
+            database yang akan menerima pesan.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={selectAllFilteredForBroadcast}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
+            >
+              Pilih semua (terlihat)
+            </button>
+            <button
+              type="button"
+              onClick={clearBroadcastSelection}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm"
+            >
+              Hapus pilihan
+            </button>
+            <Button
+              type="button"
+              disabled={broadcastVendorIds.length === 0 || broadcastSubmitting}
+              onClick={() => void sendVendorEmailBroadcast()}
+              className="min-h-10 text-sm"
+            >
+              {broadcastSubmitting ? 'Mengirim…' : `Kirim email (${broadcastVendorIds.length})`}
+            </Button>
+          </div>
+        </div>
+      )}
+
       {filteredMatchedVendorIds.length === 0 && (
         <p className="text-left text-sm text-slate-600">Tidak ada vendor yang cocok dengan filter.</p>
       )}
@@ -655,6 +751,7 @@ export function AdminInquiryDetailPage() {
           const token = tokensByVendor.get(vid)
           const quote = quotes.find((q) => q.vendorId === vid)
           const hasQuote = Boolean(quote)
+          const selectedForBroadcast = broadcastVendorIds.includes(vid)
 
           return (
             <SectionCard
@@ -665,34 +762,49 @@ export function AdminInquiryDetailPage() {
                   : 'border-amber-200/85 bg-amber-50/40 shadow-sm'
               }`}
             >
-              <button
-                type="button"
-                onClick={() => openManual(vid)}
-                className="flex w-full items-center justify-between gap-2 text-left"
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate font-semibold text-slate-900">{name}</p>
-                    <Badge variant={hasQuote ? 'success' : 'neutral'} className="text-[10px]">
-                      {hasQuote ? 'Sudah merespons' : 'Belum merespons'}
-                    </Badge>
+              <div className="flex gap-2">
+                <label
+                  className="flex shrink-0 cursor-pointer items-start pt-1"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedForBroadcast}
+                    onChange={() => toggleBroadcastVendor(vid)}
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-accent"
+                    aria-label={`Pilih ${name} untuk email broadcast`}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => openManual(vid)}
+                  className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate font-semibold text-slate-900">{name}</p>
+                      <Badge variant={hasQuote ? 'success' : 'neutral'} className="text-[10px]">
+                        {hasQuote ? 'Sudah merespons' : 'Belum merespons'}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Harga: {quote ? formatIDR(quote.price) : '—'} • ETA: {quote?.eta || '—'} • Jemput:{' '}
+                      {quote?.pickupDate || '—'}
+                    </p>
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Harga: {quote ? formatIDR(quote.price) : '—'} • ETA: {quote?.eta || '—'} • Jemput:{' '}
-                    {quote?.pickupDate || '—'}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <svg
-                    viewBox="0 0 24 24"
-                    className={`h-4 w-4 text-accent transition-transform ${expandedVendor === vid ? 'rotate-180' : ''}`}
-                    fill="none"
-                    aria-hidden
-                  >
-                    <path d="m7 10 5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </div>
-              </button>
+                  <div className="flex items-center gap-2">
+                    <svg
+                      viewBox="0 0 24 24"
+                      className={`h-4 w-4 text-accent transition-transform ${expandedVendor === vid ? 'rotate-180' : ''}`}
+                      fill="none"
+                      aria-hidden
+                    >
+                      <path d="m7 10 5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </div>
+                </button>
+              </div>
 
               {expandedVendor === vid && quote && (
                 <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">

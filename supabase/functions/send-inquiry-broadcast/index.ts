@@ -163,7 +163,12 @@ async function sendEmail(input: { to: string; subject: string; html: string }): 
   }
 }
 
-export async function sendInquiryBroadcast(inquiryId: string): Promise<BroadcastSummary> {
+const MAX_EXPLICIT_VENDOR_IDS = 80
+
+export async function sendInquiryBroadcast(
+  inquiryId: string,
+  explicitVendorIds?: string[] | null,
+): Promise<BroadcastSummary> {
   const summary: BroadcastSummary = { success: 0, failed: 0, errors: [] }
   const supabaseUrl = requiredEnv('SUPABASE_URL')
   const serviceKey = requiredEnv('SUPABASE_SERVICE_ROLE_KEY')
@@ -172,7 +177,18 @@ export async function sendInquiryBroadcast(inquiryId: string): Promise<Broadcast
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
-  console.log(`[broadcast] start inquiryId=${inquiryId}`)
+  const adminSelectedIds = Array.from(
+    new Set(
+      (explicitVendorIds || [])
+        .map((x) => (typeof x === 'string' ? x.trim() : ''))
+        .filter(Boolean)
+        .slice(0, MAX_EXPLICIT_VENDOR_IDS),
+    ),
+  )
+
+  console.log(
+    `[broadcast] start inquiryId=${inquiryId} explicitVendors=${adminSelectedIds.length ? adminSelectedIds.length : 'auto'}`,
+  )
 
   const { data: inquiry, error: inqErr } = await supabase
     .from('km_inquiries')
@@ -194,43 +210,74 @@ export async function sendInquiryBroadcast(inquiryId: string): Promise<Broadcast
 
   // Vendor query (try with is_active; fallback if column missing).
   let vendors: VendorRow[] = []
-  {
-    const base = supabase
+  const tokensByVendor = new Map<string, string>()
+
+  if (adminSelectedIds.length > 0) {
+    const r1 = await supabase
       .from('vendors')
       .select('id,name,email,origin_cities,destination_cities,is_active')
-      .contains('origin_cities', [originCity])
-      .contains('destination_cities', [destinationCity])
+      .in('id', adminSelectedIds)
 
-    const r1 = await base
     if (r1.error && /is_active/i.test(r1.error.message)) {
       const r2 = await supabase
         .from('vendors')
         .select('id,name,email,origin_cities,destination_cities')
-        .contains('origin_cities', [originCity])
-        .contains('destination_cities', [destinationCity])
+        .in('id', adminSelectedIds)
       if (r2.error) {
         summary.failed += 1
         summary.errors.push({ stage: 'vendor_query', message: r2.error.message })
         return summary
       }
-      vendors = (r2.data || []) as VendorRow[]
+      const byId = new Map((r2.data || []).map((v) => [v.id, v as VendorRow]))
+      vendors = adminSelectedIds.map((id) => byId.get(id)).filter((v): v is VendorRow => Boolean(v))
     } else if (r1.error) {
       summary.failed += 1
       summary.errors.push({ stage: 'vendor_query', message: r1.error.message })
       return summary
     } else {
-      vendors = (r1.data || []) as VendorRow[]
+      const byId = new Map((r1.data || []).map((v) => [v.id, v as VendorRow]))
+      vendors = adminSelectedIds.map((id) => byId.get(id)).filter((v): v is VendorRow => Boolean(v))
     }
-  }
 
-  // Optional: enforce active vendors only if field is present.
-  vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+    vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+    console.log(`[broadcast] admin_selected count=${vendors.length}`)
+  } else {
+    {
+      const base = supabase
+        .from('vendors')
+        .select('id,name,email,origin_cities,destination_cities,is_active')
+        .contains('origin_cities', [originCity])
+        .contains('destination_cities', [destinationCity])
 
-  // Fallback: jika data onboarding `origin_cities/destination_cities` belum terisi,
-  // gunakan daftar vendor yang sudah punya token di km_vendor_tokens (dibuat oleh backend).
-  // Ini memastikan broadcast tetap berjalan untuk inquiry yang sudah dibuat.
-  const tokensByVendor = new Map<string, string>()
-  if (vendors.length === 0) {
+      const r1 = await base
+      if (r1.error && /is_active/i.test(r1.error.message)) {
+        const r2 = await supabase
+          .from('vendors')
+          .select('id,name,email,origin_cities,destination_cities')
+          .contains('origin_cities', [originCity])
+          .contains('destination_cities', [destinationCity])
+        if (r2.error) {
+          summary.failed += 1
+          summary.errors.push({ stage: 'vendor_query', message: r2.error.message })
+          return summary
+        }
+        vendors = (r2.data || []) as VendorRow[]
+      } else if (r1.error) {
+        summary.failed += 1
+        summary.errors.push({ stage: 'vendor_query', message: r1.error.message })
+        return summary
+      } else {
+        vendors = (r1.data || []) as VendorRow[]
+      }
+    }
+
+    // Optional: enforce active vendors only if field is present.
+    vendors = vendors.filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
+
+    // Fallback: jika data onboarding `origin_cities/destination_cities` belum terisi,
+    // gunakan daftar vendor yang sudah punya token di km_vendor_tokens (dibuat oleh backend).
+    // Ini memastikan broadcast tetap berjalan untuk inquiry yang sudah dibuat.
+    if (vendors.length === 0) {
     const { data: tokenRows, error: tokenErr } = await supabase
       .from('km_vendor_tokens')
       .select('token,vendor_id')
@@ -257,6 +304,7 @@ export async function sendInquiryBroadcast(inquiryId: string): Promise<Broadcast
       }
       vendors = (vendorRows || []).filter((v) => v.email && v.email.includes('@')).filter((v) => v.is_active !== false)
       console.log(`[broadcast] fallback_from_tokens vendors=${vendors.length} tokens=${vendorIds.length}`)
+    }
     }
   }
 
@@ -383,10 +431,14 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return jsonResponse(405, { error: 'method_not_allowed' })
 
   try {
-    const payload = (await req.json().catch(() => null)) as { inquiryId?: string } | null
+    const payload = (await req.json().catch(() => null)) as {
+      inquiryId?: string
+      vendorIds?: string[]
+    } | null
     const inquiryId = payload?.inquiryId?.trim()
     if (!inquiryId) return jsonResponse(400, { error: 'missing_inquiry_id' })
-    const summary = await sendInquiryBroadcast(inquiryId)
+    const vendorIds = Array.isArray(payload?.vendorIds) ? payload.vendorIds : undefined
+    const summary = await sendInquiryBroadcast(inquiryId, vendorIds)
     return jsonResponse(200, summary)
   } catch (err) {
     console.log(`[broadcast] handler_error ${err instanceof Error ? err.message : String(err)}`)

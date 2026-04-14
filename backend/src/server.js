@@ -42,7 +42,7 @@ export function ensureInitialized() {
   return initPromise
 }
 
-async function invokeBroadcastEdgeFunction(inquiryId) {
+async function invokeBroadcastEdgeFunction(inquiryId, vendorIds = null) {
   // Best-effort: jangan gagalkan create inquiry kalau email gagal.
   const base = (config.supabaseUrl || '').replace(/\/$/, '')
   const key = config.supabaseServiceRoleKey
@@ -50,8 +50,14 @@ async function invokeBroadcastEdgeFunction(inquiryId) {
     console.warn('Broadcast skipped: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
     return
   }
+  const payload =
+    Array.isArray(vendorIds) && vendorIds.length > 0
+      ? { inquiryId, vendorIds }
+      : { inquiryId }
+  const timeoutMs =
+    Array.isArray(vendorIds) && vendorIds.length > 0 ? Math.min(120_000, 15_000 + vendorIds.length * 400) : 2500
   const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), 2500)
+  const t = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const res = await fetch(`${base}/functions/v1/send-inquiry-broadcast`, {
       method: 'POST',
@@ -60,7 +66,7 @@ async function invokeBroadcastEdgeFunction(inquiryId) {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ inquiryId }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     })
     if (!res.ok) {
@@ -72,6 +78,47 @@ async function invokeBroadcastEdgeFunction(inquiryId) {
     console.log('Broadcast invoked', body)
   } catch (e) {
     console.warn('Broadcast invoke error', e instanceof Error ? e.message : String(e))
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+/** Admin-triggered broadcast: tunggu respons edge function (timeout lebih lama). */
+async function invokeBroadcastEdgeFunctionForAdmin(inquiryId, vendorIds) {
+  const base = (config.supabaseUrl || '').replace(/\/$/, '')
+  const key = config.supabaseServiceRoleKey
+  if (!base || !key) {
+    return { ok: false, status: 503, body: { error: 'broadcast_unconfigured' } }
+  }
+  const ids = Array.isArray(vendorIds) ? vendorIds : []
+  const timeoutMs = Math.min(180_000, 20_000 + ids.length * 500)
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${base}/functions/v1/send-inquiry-broadcast`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ inquiryId, vendorIds: ids }),
+      signal: controller.signal,
+    })
+    const text = await res.text().catch(() => '')
+    let json = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = { raw: text }
+    }
+    return { ok: res.ok, status: res.status, body: json }
+  } catch (e) {
+    return {
+      ok: false,
+      status: 504,
+      body: { error: 'broadcast_timeout_or_unreachable', detail: e instanceof Error ? e.message : String(e) },
+    }
   } finally {
     clearTimeout(t)
   }
@@ -830,6 +877,35 @@ app.post(
   } catch (err) {
     next(err)
   }
+  },
+)
+
+app.post(
+  '/admin/inquiries/:id/broadcast',
+  requireTrustedOrigin,
+  requireAuth(['admin']),
+  async (req, res, next) => {
+    try {
+      const raw = req.body?.vendorIds
+      const vendorIds = Array.isArray(raw)
+        ? raw.map((x) => String(x ?? '').trim()).filter(Boolean)
+        : []
+      if (vendorIds.length === 0) {
+        return res.status(400).json({ error: 'vendor_ids_required' })
+      }
+      const inquiryId = req.params.id
+      const exists = await query(`SELECT id FROM km_inquiries WHERE id = $1 LIMIT 1`, [inquiryId])
+      if (!exists.rows[0]) {
+        return res.status(404).json({ error: 'not_found' })
+      }
+      const result = await invokeBroadcastEdgeFunctionForAdmin(inquiryId, vendorIds)
+      if (!result.ok) {
+        return res.status(result.status >= 400 ? result.status : 502).json(result.body || { error: 'broadcast_failed' })
+      }
+      res.json(result.body ?? { ok: true })
+    } catch (err) {
+      next(err)
+    }
   },
 )
 
